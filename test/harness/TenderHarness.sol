@@ -29,6 +29,16 @@ contract TenderHarness is Tender {
         _eligibleCount = eligible;
     }
 
+    /// @dev Marks an existing bid opened at `price`. Add the bid with `h_addBid` first.
+    function h_setOpened(address bidder, uint256 price) external {
+        _bids[bidder].opened = true;
+        _bids[bidder].price = price;
+    }
+
+    function h_setWinner(address winner) external {
+        _winner = winner;
+    }
+
     /// @dev Inserts or overwrites a bid record, tracking `bidder` in `_bidders` at most once.
     function h_addBid(address bidder, uint64 vendorId, BidState state, bool opened) external {
         if (!_h_tracked[bidder]) {

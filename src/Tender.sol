@@ -5,7 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {VendorRegistry} from "./VendorRegistry.sol";
-import {Bid, BidState, Phase, TerminalCause} from "./TenderTypes.sol";
+import {Bid, BidState, Phase, Settlement, TerminalCause} from "./TenderTypes.sol";
 
 /// @title Tender
 /// @notice One sealed-bid public tender: salted price commitments, price-blind k-of-n
@@ -94,15 +94,17 @@ contract Tender is ReentrancyGuard {
 
     address[] internal _bidders;
     mapping(address => Bid) internal _bids;
-    // Written by castVote/resolveEscalation/resolveAppeal/cancel (Steps 5-6), not yet
-    // implemented, and in the meantime by TenderHarness (test-only); already read by
-    // `_evaluate` in this step, so forge-lint's uninitialized-state check cannot yet see
-    // a writer.
+    // Written by castVote/resolveEscalation/resolveAppeal/cancel/acceptAward (Steps 5-6),
+    // not yet implemented, and in the meantime by TenderHarness (test-only); already read
+    // by `_evaluate`/`settlementOf` in this step, so forge-lint's uninitialized-state check
+    // cannot yet see a writer.
     // forge-lint: disable-next-line(uninitialized-state)
     bool internal _cancelledByPE;
+    // forge-lint: disable-next-line(uninitialized-state)
     uint64 internal _cancelledAt;
     // forge-lint: disable-next-line(uninitialized-state)
     bool internal _accepted;
+    // forge-lint: disable-next-line(uninitialized-state)
     address internal _winner;
     uint256 internal _activeBidCount;
     // forge-lint: disable-next-line(uninitialized-state)
@@ -144,6 +146,9 @@ contract Tender is ReentrancyGuard {
         address indexed bidder, bytes32 priceCommitment, bytes32 docHash, bytes32 docCipherRef
     );
     event BidWithdrawn(address indexed bidder);
+    event DepositSettled(
+        address indexed bidder, address indexed recipient, uint256 amount, bool forfeited
+    );
 
     // ---------------------------------------------------------------------
     // Errors (SPEC §3)
@@ -172,6 +177,7 @@ contract Tender is ReentrancyGuard {
     error VendorIsDebarred(uint64 vendorId);
     error BidExists();
     error TooManyBidders();
+    error NothingToSettle();
 
     /// @notice Deploy one tender. Every parameter is fixed for its lifetime (I7).
     /// @param config Full tender configuration (SPEC §3). Reverts on any validation failure.
@@ -402,21 +408,172 @@ contract Tender is ReentrancyGuard {
         return (Phase.Cancelled, TerminalCause.AllOffersLapsed);
     }
 
-    /// @notice Number of bids that would count toward ranking (SPEC §5): state Eligible,
-    ///         opened, and not debarred strictly before `priceRevealStart`.
-    /// @dev Bounded by `maxBidders` (<= 50).
-    function rankedCount() public view returns (uint256 count) {
+    /// @notice Number of bids that would count toward ranking (SPEC §5). See `ranking`.
+    function rankedCount() public view returns (uint256) {
+        return ranking().length;
+    }
+
+    // ---------------------------------------------------------------------
+    // Ranking and offer rounds (SPEC §5)
+    // ---------------------------------------------------------------------
+
+    /// @notice Ranked bidders sorted by price ascending, tie rank ascending. A ranked bid
+    ///         has state Eligible, is opened, and is not debarred strictly before
+    ///         `priceRevealStart`.
+    /// @dev Bounded by `maxBidders` (<= 50); insertion sort.
+    function ranking() public view returns (address[] memory ranked) {
         uint256 len = _bidders.length;
+        address[] memory candidates = new address[](len);
+        uint256 count = 0;
         for (uint256 i = 0; i < len; i++) {
-            Bid storage b = _bids[_bidders[i]];
+            address bidder = _bidders[i];
+            Bid storage b = _bids[bidder];
             if (b.state == BidState.Eligible && b.opened) {
                 // The registry is the only external contract this view may call (besides
                 // the deposit token, unused here); the loop is bounded by maxBidders (<= 50).
                 // forge-lint: disable-next-line(calls-loop)
                 bool debarredBeforeCutoff = registry.isDebarredBefore(b.vendorId, priceRevealStart);
-                if (!debarredBeforeCutoff) count++;
+                if (!debarredBeforeCutoff) {
+                    candidates[count] = bidder;
+                    count++;
+                }
             }
         }
+
+        ranked = new address[](count);
+        for (uint256 i = 0; i < count; i++) {
+            ranked[i] = candidates[i];
+        }
+        for (uint256 i = 1; i < count; i++) {
+            address key = ranked[i];
+            uint256 j = i;
+            while (j > 0 && _ranksBefore(key, ranked[j - 1])) {
+                ranked[j] = ranked[j - 1];
+                j--;
+            }
+            ranked[j] = key;
+        }
+    }
+
+    /// @notice The current offer round, if any (SPEC §5). `round` is 1-based; 0 if none.
+    function currentOffer()
+        external
+        view
+        returns (uint256 round, address offeree, uint64 windowEnd)
+    {
+        // casting to uint64 is safe: block timestamps fit in uint64 for ~584 billion years
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 t = uint64(block.timestamp);
+        if (t < priceRevealEnd) return (0, address(0), 0);
+
+        uint64 i = (t - priceRevealEnd) / acceptanceWindow;
+        address[] memory ranked = ranking();
+        if (i >= ranked.length) return (0, address(0), 0);
+
+        round = i + 1;
+        offeree = ranked[i];
+        windowEnd = priceRevealEnd + (i + 1) * acceptanceWindow;
+    }
+
+    /// @dev Deterministic, arbitrary tie-break: lower hash wins (SPEC §5).
+    function _tieRank(uint64 vendorId) internal view returns (bytes32) {
+        return keccak256(abi.encode(address(this), vendorId));
+    }
+
+    /// @dev True if bid `a` ranks strictly before bid `b`: lower price, then lower tie rank.
+    function _ranksBefore(address a, address b) internal view returns (bool) {
+        Bid storage bidA = _bids[a];
+        Bid storage bidB = _bids[b];
+        if (bidA.price != bidB.price) return bidA.price < bidB.price;
+        return _tieRank(bidA.vendorId) < _tieRank(bidB.vendorId);
+    }
+
+    /// @dev Linear search bounded by `maxBidders` (<= 50). Returns `list.length` (an
+    ///      otherwise-invalid index) as the not-found sentinel.
+    function _indexOf(address[] memory list, address target) internal pure returns (uint256 index) {
+        uint256 len = list.length;
+        for (uint256 i = 0; i < len; i++) {
+            if (list[i] == target) return i;
+        }
+        return len;
+    }
+
+    // ---------------------------------------------------------------------
+    // Settlement (SPEC §6.10, §7)
+    // ---------------------------------------------------------------------
+
+    /// @notice The settlement outcome for `bidder`'s deposit: a pure function of the bid's
+    ///         final status and the tender's terminal state (SPEC §7).
+    function settlementOf(address bidder)
+        public
+        view
+        returns (Settlement outcome, address recipient, uint256 amount)
+    {
+        Bid storage bid = _bids[bidder];
+        if (bid.state == BidState.None) return (Settlement.None, address(0), 0);
+        if (bid.settled) return (Settlement.Settled, address(0), 0);
+        if (bid.state == BidState.Withdrawn) return (Settlement.Refund, bidder, depositAmount);
+
+        (Phase phase, TerminalCause cause) = _evaluate();
+        if (phase != Phase.Final && phase != Phase.Cancelled && phase != Phase.Failed) {
+            return (Settlement.Pending, address(0), 0);
+        }
+
+        // F1: committed but never posted a key envelope, and the tech-reveal deadline
+        // passed before the tender ended.
+        if (bid.state == BidState.Committed) {
+            bool techRevealPassedBeforeEnd = !_cancelledByPE || _cancelledAt >= techRevealEnd;
+            if (techRevealPassedBeforeEnd) return (Settlement.Forfeit, treasury, depositAmount);
+            return (Settlement.Refund, bidder, depositAmount);
+        }
+
+        bool debarredBeforeCutoff = registry.isDebarredBefore(bid.vendorId, priceRevealStart);
+
+        // F2: eligible but never opened (withheld its price), and the price-reveal phase
+        // completed.
+        if (bid.state == BidState.Eligible && !bid.opened && !debarredBeforeCutoff) {
+            if (
+                cause == TerminalCause.NoRankedBids || cause == TerminalCause.AllOffersLapsed
+                    || cause == TerminalCause.AwardAccepted
+            ) {
+                return (Settlement.Forfeit, treasury, depositAmount);
+            }
+        }
+
+        // F3: ranked, but its offer window passed without acceptance.
+        if (bid.state == BidState.Eligible && bid.opened && !debarredBeforeCutoff) {
+            address[] memory ranked = ranking();
+            uint256 i = _indexOf(ranked, bidder);
+            if (i < ranked.length) {
+                if (cause == TerminalCause.AllOffersLapsed) {
+                    return (Settlement.Forfeit, treasury, depositAmount);
+                }
+                if (cause == TerminalCause.AwardAccepted) {
+                    uint256 w = _indexOf(ranked, _winner);
+                    if (w < ranked.length && w > i) {
+                        return (Settlement.Forfeit, treasury, depositAmount);
+                    }
+                }
+            }
+        }
+
+        return (Settlement.Refund, bidder, depositAmount);
+    }
+
+    /// @notice Settle `bidder`'s deposit: pays out a Refund or Forfeit exactly once (I11).
+    ///         Callable by anyone.
+    function settle(address bidder) external nonReentrant {
+        (Settlement outcome, address recipient, uint256 amount) = settlementOf(bidder);
+        if (outcome != Settlement.Refund && outcome != Settlement.Forfeit) {
+            revert NothingToSettle();
+        }
+
+        _bids[bidder].settled = true;
+        _totalLiabilities -= amount;
+
+        token.safeTransfer(recipient, amount);
+
+        emit DepositSettled(bidder, recipient, amount, outcome == Settlement.Forfeit);
     }
 
     // ---------------------------------------------------------------------
