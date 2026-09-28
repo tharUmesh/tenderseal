@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {console} from "forge-std/console.sol";
 import {Bid, BidState, Phase} from "../../src/TenderTypes.sol";
 import {TenderTestBase} from "../utils/TenderTestBase.sol";
 import {Tender} from "../../src/Tender.sol";
@@ -8,7 +9,24 @@ import {TenderHandler} from "./TenderHandler.sol";
 
 /// @dev Invariant suite (SPEC §9, I1-I12) driven by a bounded handler: 5 registered
 ///      bidders, the tender's own 3 evaluators/PE/authority, bounded forward-only time
-///      warps. `foundry.toml` sets runs = 256, depth = 64, fail_on_revert = false.
+///      warps. `foundry.toml` sets runs = 256, fail_on_revert = false; depth is raised to
+///      500 for this contract specifically (Step 7b item 1).
+///
+///      Vacuity check (see `afterInvariant`): even after depth 64->500, four separate
+///      warp-collapse guards (`_clampWarpTarget`), and guided bidder/evaluator targeting
+///      (`_bidderWithState`/`_evaluatorWhoHasntVoted`) -- each of which measurably helped
+///      (vote successes went 0 -> 10 -> 56 across these changes) -- PriceReveal/
+///      Acceptance/Final are still reached in well under 20% of runs (see the Step 7b
+///      report for the exact numbers). This is a genuine, reported limitation of
+///      unguided action-level fuzzing for a protocol this deep (5 actors x 3 evaluators
+///      x ~19 actions x 6 sequential preconditions before any late phase is reachable at
+///      all), not a defect papered over: the late-phase/settlement properties this
+///      handler under-explores (award-to-lowest, F2/F3 forfeiture, re-award after lapse)
+///      are instead covered deterministically by TenderAward.t.sol, TenderScenarios.t.sol
+///      and TenderSettle.t.sol. The invariant suite's real contribution is checking I1/
+///      I3/I6/I7/I8/I10/I11 hold under genuinely random *early/mid*-lifecycle sequences,
+///      which it does exercise heavily (Open 93%, TechReveal 30%, Evaluation 12%).
+/// forge-config: default.invariant.depth = 500
 contract TenderInvariantsTest is TenderTestBase {
     Tender internal tender;
     TenderHandler internal handler;
@@ -44,6 +62,7 @@ contract TenderInvariantsTest is TenderTestBase {
         evaluators[1] = eval2;
         evaluators[2] = eval3;
 
+        Tender.Schedule memory s = _defaultSchedule();
         handler = new TenderHandler(
             tender,
             registry,
@@ -53,10 +72,80 @@ contract TenderInvariantsTest is TenderTestBase {
             treasury,
             evaluators,
             bidderAddrs,
-            vendorIds
+            vendorIds,
+            TenderHandler.ScheduleConfig({
+                submissionDeadline: s.submissionDeadline,
+                techRevealEnd: s.techRevealEnd,
+                evaluationEnd: s.evaluationEnd,
+                appealFilingEnd: s.appealFilingEnd,
+                priceRevealStart: s.priceRevealStart,
+                priceRevealEnd: s.priceRevealEnd,
+                acceptanceWindow: s.acceptanceWindow,
+                threshold: 2
+            })
         );
 
         targetContract(address(handler));
+    }
+
+    // ------------------------------------------------------------------ vacuity check (Step 7b, item 1)
+
+    /// @dev Runs once per invariant run. Prints one CSV-ish line per run so the agent
+    ///      driving this suite can compute, across all `runs`, what fraction of sequences
+    ///      actually reached each phase, and how many of each action succeeded (settles
+    ///      broken down by refund vs. F1/F2/F3) -- a vacuity check on the whole suite.
+    function afterInvariant() public {
+        string memory phases = _phaseFlags();
+        string memory actions = _actionCounts();
+        string memory line = string.concat("PHASELOG,", phases, ",", actions);
+        console.log(line);
+        vm.writeLine("test/invariant/.phase-reach-log.csv", line);
+    }
+
+    function _phaseFlags() internal view returns (string memory) {
+        string memory a = string.concat(
+            _flag(Phase.Open), ",", _flag(Phase.TechReveal), ",", _flag(Phase.Evaluation)
+        );
+        string memory b = string.concat(
+            _flag(Phase.AppealFiling),
+            ",",
+            _flag(Phase.AppealResolution),
+            ",",
+            _flag(Phase.PriceReveal)
+        );
+        string memory c = string.concat(
+            _flag(Phase.Acceptance), ",", _flag(Phase.Final), ",", _flag(Phase.Cancelled)
+        );
+        return string.concat(a, ",", b, ",", c, ",", _flag(Phase.Failed));
+    }
+
+    function _actionCounts() internal view returns (string memory) {
+        string memory a = string.concat(
+            vm.toString(handler.ghost_commitSuccesses()),
+            ",",
+            vm.toString(handler.ghost_voteSuccesses()),
+            ",",
+            vm.toString(handler.ghost_appealSuccesses())
+        );
+        string memory b = string.concat(
+            vm.toString(handler.ghost_revealSuccesses()),
+            ",",
+            vm.toString(handler.ghost_acceptSuccesses()),
+            ",",
+            vm.toString(handler.ghost_settleRefundCount())
+        );
+        string memory c = string.concat(
+            vm.toString(handler.ghost_settleForfeitF1Count()),
+            ",",
+            vm.toString(handler.ghost_settleForfeitF2Count()),
+            ",",
+            vm.toString(handler.ghost_settleForfeitF3Count())
+        );
+        return string.concat(a, ",", b, ",", c);
+    }
+
+    function _flag(Phase p) internal view returns (string memory) {
+        return handler.ghost_phaseSeenThisRun(uint256(p)) ? "1" : "0";
     }
 
     // ------------------------------------------------------------------ I1, I11

@@ -14,3 +14,6 @@ CLAUDE.md
 # Dotenv file
 .env
 
+# Scratch output from TenderInvariantsTest.afterInvariant() (Step 7b vacuity check)
+test/invariant/.phase-reach-log.csv
+

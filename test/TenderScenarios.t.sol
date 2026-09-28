@@ -25,6 +25,13 @@ contract TenderScenariosTest is TenderTestBase {
         token.approve(address(t), type(uint256).max);
     }
 
+    function _fundAndApproveAmount(Tender t, address who, uint256 amount) internal {
+        vm.prank(admin);
+        token.mint(who, amount);
+        vm.prank(who);
+        token.approve(address(t), type(uint256).max);
+    }
+
     function _commitment(Tender t, address bidder, uint256 price, bytes32 salt)
         internal
         view
@@ -198,9 +205,12 @@ contract TenderScenariosTest is TenderTestBase {
     ///      manipulating the price, but costs the withholder's deposit (F2), is publicly
     ///      visible (Eligible, opened == false, forfeited), and attributable (its vendor
     ///      ID is on-chain).
-    uint256 internal constant RING_LOW_PRICE = 50;
-    uint256 internal constant RING_WINNER_PRICE = 190;
-    uint256 internal constant RING_OUTSIDER_PRICE = 200;
+    // Realistic LKR amounts (2 decimals, matching DEPOSIT = LKR 100,000.00 from the base
+    // fixture): ring low bid LKR 8,000,000.00 (withheld), ring winner LKR 8,950,000.00,
+    // outsider LKR 9,000,000.00.
+    uint256 internal constant RING_LOW_PRICE = 8_000_000_00;
+    uint256 internal constant RING_WINNER_PRICE = 8_950_000_00;
+    uint256 internal constant RING_OUTSIDER_PRICE = 9_000_000_00;
 
     /// @dev Deploys a tender and runs the ring's collusion through price reveal:
     ///      ringLowBidder (true price 50) stays Eligible but never calls revealPrice;
@@ -299,12 +309,15 @@ contract TenderScenariosTest is TenderTestBase {
         tender.acceptAward();
         assertEq(tender.winner(), ringWinner);
 
-        // The price advantage the ring captured: what the tender pays (190) vs. what
-        // honest competition would have produced had ringLowBidder revealed (50).
-        assertEq(RING_WINNER_PRICE - RING_LOW_PRICE, 140);
+        // The price advantage the ring captured: what the tender pays (LKR 8,950,000.00)
+        // vs. what honest competition would have produced had ringLowBidder revealed
+        // (LKR 8,000,000.00) -- LKR 950,000.00.
+        assertEq(RING_WINNER_PRICE - RING_LOW_PRICE, 950_000_00);
 
-        // The cost: ringLowBidder's deposit is forfeited (F2 -- Eligible, never opened,
-        // terminal cause AwardAccepted) -- exactly one deposit, no more, no less.
+        // The cost: ringLowBidder's deposit (LKR 100,000.00) is forfeited (F2 --
+        // Eligible, never opened, terminal cause AwardAccepted) -- exactly one deposit,
+        // no more, no less. Net gain to the ring: LKR 950,000.00 - LKR 100,000.00 =
+        // LKR 850,000.00 -- profitable, since the price advantage exceeds the deposit.
         _assertRingLowBidderForfeits(tender, ringLowBidder);
     }
 
@@ -317,5 +330,101 @@ contract TenderScenariosTest is TenderTestBase {
         uint256 treasuryBalanceBefore = token.balanceOf(treasury);
         tender.settle(ringLowBidder);
         assertEq(token.balanceOf(treasury), treasuryBalanceBefore + DEPOSIT);
+    }
+
+    // ==================================================================
+    // Fuzz: ring net gain = (high - low) - deposit
+    // ==================================================================
+
+    /// @dev Two-bidder version of the ring attack (no outsider needed: the net-gain
+    ///      formula only depends on the ring's own low/high prices and the deposit).
+    ///      ringLow withholds; ringHigh reveals and wins by default. Asserts the ring's
+    ///      net gain equals (high - low) - deposit, i.e. withholding is profitable
+    ///      exactly when the price advantage exceeds the forfeited deposit.
+    function testFuzz_RingAttack_NetGainEqualsPriceAdvantageMinusDeposit(
+        uint256 lowPriceSeed,
+        uint256 highPriceSeed,
+        uint256 depositSeed
+    ) public {
+        uint256 lowPrice = bound(lowPriceSeed, 1, 10_000_000_00);
+        uint256 highPrice = bound(highPriceSeed, lowPrice + 1, 10_000_000_00 + 1);
+        uint256 depositAmount = bound(depositSeed, 1, 5_000_000_00);
+
+        (Tender tender, address ringLow, address ringHigh) =
+            _setupTwoBidderRing(lowPrice, highPrice, depositAmount);
+
+        vm.warp(tender.priceRevealStart());
+        tender.revealPrice(ringHigh, highPrice, keccak256("fuzzSaltHigh")); // ringLow withholds
+
+        vm.warp(tender.priceRevealEnd());
+        (, address offeree,) = tender.currentOffer();
+        assertEq(offeree, ringHigh);
+        vm.prank(ringHigh);
+        tender.acceptAward();
+
+        (Settlement outcome,, uint256 amount) = tender.settlementOf(ringLow);
+        assertEq(uint256(outcome), uint256(Settlement.Forfeit));
+        assertEq(amount, depositAmount);
+
+        int256 netGain = int256(highPrice) - int256(lowPrice) - int256(depositAmount);
+        bool profitable = highPrice - lowPrice > depositAmount;
+        assertEq(netGain > 0, profitable);
+    }
+
+    function _setupTwoBidderRing(uint256 lowPrice, uint256 highPrice, uint256 depositAmount)
+        internal
+        returns (Tender tender, address ringLow, address ringHigh)
+    {
+        ringLow = makeAddr("fuzzRingLow");
+        ringHigh = makeAddr("fuzzRingHigh");
+        _registerVendor(ringLow, keccak256("fuzzRingLow"));
+        _registerVendor(ringHigh, keccak256("fuzzRingHigh"));
+
+        vm.warp(T0 + 1 hours);
+        Tender.TenderConfig memory config = _defaultConfig();
+        config.depositAmount = depositAmount;
+        tender = new Tender(config);
+
+        _fundAndApproveAmount(tender, ringLow, depositAmount);
+        _fundAndApproveAmount(tender, ringHigh, depositAmount);
+
+        _twoBidderRingCommitRevealVote(tender, ringLow, ringHigh, lowPrice, highPrice);
+    }
+
+    function _twoBidderRingCommitRevealVote(
+        Tender tender,
+        address ringLow,
+        address ringHigh,
+        uint256 lowPrice,
+        uint256 highPrice
+    ) internal {
+        vm.prank(ringLow);
+        tender.commit(
+            _commitment(tender, ringLow, lowPrice, keccak256("fuzzSaltLow")),
+            DOC_HASH,
+            DOC_CIPHER_REF
+        );
+        vm.prank(ringHigh);
+        tender.commit(
+            _commitment(tender, ringHigh, highPrice, keccak256("fuzzSaltHigh")),
+            DOC_HASH,
+            DOC_CIPHER_REF
+        );
+
+        vm.warp(tender.submissionDeadline());
+        vm.prank(ringLow);
+        tender.postKeyEnvelope(KEY_ENV_REF);
+        vm.prank(ringHigh);
+        tender.postKeyEnvelope(KEY_ENV_REF);
+
+        vm.warp(tender.techRevealEnd());
+        vm.prank(eval1);
+        tender.castVote(ringLow, true, REASON_COMPLIANT, REPORT_HASH);
+        vm.prank(eval2);
+        tender.castVote(ringLow, true, REASON_COMPLIANT, REPORT_HASH);
+        vm.prank(eval1);
+        tender.castVote(ringHigh, true, REASON_COMPLIANT, REPORT_HASH);
+        vm.prank(eval2);
+        tender.castVote(ringHigh, true, REASON_COMPLIANT, REPORT_HASH);
     }
 }

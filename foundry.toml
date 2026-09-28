@@ -14,6 +14,13 @@ remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "forge-std/=lib/forge-std/src/",
 ]
+# Scoped to one scratch file: TenderInvariantsTest.afterInvariant() appends a CSV line
+# per run (console.log alone only surfaces the last run's output), so the agent driving
+# the suite can compute the phase-reach distribution across all runs afterward. Test-only
+# diagnostics; nothing under src/ reads or writes this.
+fs_permissions = [
+  { access = "read-write", path = "./test/invariant/.phase-reach-log.csv" },
+]
 
 [fuzz]
 runs = 1000
