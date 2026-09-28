@@ -712,16 +712,6 @@ contract Tender is ReentrancyGuard {
         return _tieRank(bidA.vendorId) < _tieRank(bidB.vendorId);
     }
 
-    /// @dev Linear search bounded by `maxBidders` (<= 50). Returns `list.length` (an
-    ///      otherwise-invalid index) as the not-found sentinel.
-    function _indexOf(address[] memory list, address target) internal pure returns (uint256 index) {
-        uint256 len = list.length;
-        for (uint256 i = 0; i < len; i++) {
-            if (list[i] == target) return i;
-        }
-        return len;
-    }
-
     // ---------------------------------------------------------------------
     // Award (SPEC §6.9)
     // ---------------------------------------------------------------------
@@ -792,20 +782,26 @@ contract Tender is ReentrancyGuard {
             }
         }
 
-        // F3: ranked, but its offer window passed without acceptance.
+        /// @dev F3: ranked, but its offer window passed without acceptance (SPEC §7).
+        ///      Membership in `ranking()` is exactly `state == Eligible && opened &&
+        ///      !debarredBeforeCutoff` (already checked above), so there is no need to
+        ///      materialize the array or look up indices in it (Step 7c gas optimization,
+        ///      no rule change). `ranking()` sorts strictly by (price, tieRank) ascending
+        ///      (`_ranksBefore`), so for any two of its members, "index(bidder) <
+        ///      index(winner)" and "(bidder.price, tieRank(bidder)) < (winner.price,
+        ///      tieRank(winner))" are the same statement: the array position IS the sort
+        ///      key's rank. SPEC §7's "winner at index w > i" is therefore exactly
+        ///      `_ranksBefore(bidder, _winner)`. This holds even when prices tie: ties are
+        ///      broken by tieRank alone, both in `ranking()`'s sort and in
+        ///      `_ranksBefore`. `_winner` (when cause == AwardAccepted) is itself always a
+        ///      `ranking()` member by construction of `acceptAward`/`currentOffer`, so
+        ///      reading `_bids[_winner]` directly (inside `_ranksBefore`) is safe.
         if (bid.state == BidState.Eligible && bid.opened && !debarredBeforeCutoff) {
-            address[] memory ranked = ranking();
-            uint256 i = _indexOf(ranked, bidder);
-            if (i < ranked.length) {
-                if (cause == TerminalCause.AllOffersLapsed) {
-                    return (Settlement.Forfeit, treasury, depositAmount);
-                }
-                if (cause == TerminalCause.AwardAccepted) {
-                    uint256 w = _indexOf(ranked, _winner);
-                    if (w < ranked.length && w > i) {
-                        return (Settlement.Forfeit, treasury, depositAmount);
-                    }
-                }
+            if (cause == TerminalCause.AllOffersLapsed) {
+                return (Settlement.Forfeit, treasury, depositAmount);
+            }
+            if (cause == TerminalCause.AwardAccepted && _ranksBefore(bidder, _winner)) {
+                return (Settlement.Forfeit, treasury, depositAmount);
             }
         }
 

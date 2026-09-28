@@ -204,6 +204,76 @@ contract TenderSettleTest is TenderTestBase {
         assertEq(amount, h.depositAmount());
     }
 
+    /// @dev Step 7c: the new F3 check compares (price, tieRank) against the winner's
+    ///      directly, with no `ranking()` array in between -- so a tie in PRICE must still
+    ///      be broken purely by tieRank, exactly as `ranking()` itself would order them.
+    ///      Three ranked bids share one price; vendor IDs are picked arbitrarily and the
+    ///      resulting tie ranks sorted in-test (never hardcoded, since a tie rank is a
+    ///      hash) so the winner is deliberately the MIDDLE one by tie rank: this isolates
+    ///      "ranks ahead of the winner" / "ranks behind the winner" / "is the winner" from
+    ///      any price difference.
+    function test_SettlementOf_F3_TieBrokenByTieRankAlone_WhenAwardAccepted() public {
+        uint64[3] memory vendorIds = [uint64(111), uint64(222), uint64(333)];
+        address[3] memory bidders;
+        bytes32[3] memory ties;
+        for (uint256 i = 0; i < 3; i++) {
+            bidders[i] = _addRanked(string.concat("tied", vm.toString(i)), vendorIds[i], 100);
+            ties[i] = keccak256(abi.encode(address(h), vendorIds[i]));
+        }
+        h.h_setCounts(1, 0, 3);
+
+        // Insertion sort indices 0..2 by tie rank ascending.
+        uint256[3] memory order = [uint256(0), 1, 2];
+        for (uint256 i = 1; i < 3; i++) {
+            uint256 j = i;
+            while (j > 0 && ties[order[j]] < ties[order[j - 1]]) {
+                (order[j], order[j - 1]) = (order[j - 1], order[j]);
+                j--;
+            }
+        }
+        address ranksAhead = bidders[order[0]]; // lowest tie rank: ranks before the winner
+        address winner = bidders[order[1]]; // middle tie rank
+        address ranksBehind = bidders[order[2]]; // highest tie rank: ranks after the winner
+
+        h.h_setAccepted(true);
+        h.h_setWinner(winner);
+
+        (Settlement outcomeAhead, address recipientAhead, uint256 amountAhead) =
+            h.settlementOf(ranksAhead);
+        assertEq(uint256(outcomeAhead), uint256(Settlement.Forfeit)); // ranks ahead -> F3
+        assertEq(recipientAhead, treasury);
+        assertEq(amountAhead, h.depositAmount());
+
+        (Settlement outcomeWinner, address recipientWinner,) = h.settlementOf(winner);
+        assertEq(uint256(outcomeWinner), uint256(Settlement.Refund)); // never F3 against itself
+        assertEq(recipientWinner, winner);
+
+        (Settlement outcomeBehind, address recipientBehind,) = h.settlementOf(ranksBehind);
+        assertEq(uint256(outcomeBehind), uint256(Settlement.Refund)); // ranks behind -> Refund
+        assertEq(recipientBehind, ranksBehind);
+    }
+
+    /// @dev Under AllOffersLapsed every ranked bid forfeits regardless of order (SPEC §7),
+    ///      so two bids tied on price -- and therefore only distinguishable by tieRank --
+    ///      must BOTH still forfeit.
+    function test_SettlementOf_F3_TiedBids_BothForfeit_WhenAllOffersLapsed() public {
+        address a = _addRanked("tiedA", 1, 100);
+        address b = _addRanked("tiedB", 2, 100); // same price as a
+        h.h_setCounts(1, 0, 2);
+
+        _warpToAllOffersLapsed(2);
+        assertEq(uint256(h.terminalCause()), uint256(TerminalCause.AllOffersLapsed));
+
+        (Settlement outcomeA, address recipientA, uint256 amountA) = h.settlementOf(a);
+        (Settlement outcomeB, address recipientB, uint256 amountB) = h.settlementOf(b);
+        assertEq(uint256(outcomeA), uint256(Settlement.Forfeit));
+        assertEq(recipientA, treasury);
+        assertEq(amountA, h.depositAmount());
+        assertEq(uint256(outcomeB), uint256(Settlement.Forfeit));
+        assertEq(recipientB, treasury);
+        assertEq(amountB, h.depositAmount());
+    }
+
     // ==================================================================
     // Refund
     // ==================================================================
