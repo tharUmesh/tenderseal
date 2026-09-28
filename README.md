@@ -53,6 +53,8 @@ test/
   TenderCommit.t.sol      commit / replaceCommitment / withdraw
   TenderRanking.t.sol     ranking / currentOffer
   TenderSettle.t.sol      settlementOf / settle (SPEC §7)
+  TenderVoting.t.sol      postKeyEnvelope / declareConflict / castVote (SPEC §6.4-6.5, §8)
+  TenderAppeals.t.sol     fileAppeal / resolveEscalation / resolveAppeal (SPEC §6.6)
   utils/TenderTestBase.sol   shared fixture (actors, registry, token, default config)
   harness/TenderHarness.sol  TEST-ONLY setters for recorded facts
 ```
@@ -63,7 +65,7 @@ test/
 - [x] Step 2 — Types, configuration, phase function
 - [x] Step 3 — Money in: commit / replace / withdraw
 - [x] Step 4 — Money out: ranking, offer rounds, settlement
-- [ ] Step 5 — Technical path
+- [x] Step 5 — Technical path
 - [ ] Step 6 — Price, award, cancellation
 - [ ] Step 7 — Security evidence
 - [ ] Step 8 — Factory and deployment

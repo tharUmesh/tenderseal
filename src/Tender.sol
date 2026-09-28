@@ -26,6 +26,17 @@ contract Tender is ReentrancyGuard {
     uint256 private constant MAX_EVALUATORS = 15;
     uint256 private constant ENC_KEY_LENGTH = 33;
 
+    // Vote reason codes (SPEC §8). REASON_COMPLIANT is required iff eligible == true; the
+    // rest are valid only when eligible == false.
+    uint8 public constant REASON_COMPLIANT = 1;
+    uint8 public constant REASON_SPEC_NONCOMPLIANT = 2;
+    uint8 public constant REASON_ELIGIBILITY_CRITERIA_FAILED = 3;
+    uint8 public constant REASON_DOC_UNAVAILABLE = 4;
+    uint8 public constant REASON_DOC_UNDECRYPTABLE = 5;
+    uint8 public constant REASON_DOC_HASH_MISMATCH = 6;
+    uint8 public constant REASON_PRICE_DISCLOSED = 7;
+    uint8 public constant REASON_OTHER_DOCUMENTED = 8;
+
     // ---------------------------------------------------------------------
     // Configuration types (SPEC §3)
     // ---------------------------------------------------------------------
@@ -94,10 +105,9 @@ contract Tender is ReentrancyGuard {
 
     address[] internal _bidders;
     mapping(address => Bid) internal _bids;
-    // Written by castVote/resolveEscalation/resolveAppeal/cancel/acceptAward (Steps 5-6),
-    // not yet implemented, and in the meantime by TenderHarness (test-only); already read
-    // by `_evaluate`/`settlementOf` in this step, so forge-lint's uninitialized-state check
-    // cannot yet see a writer.
+    // Written by cancel/acceptAward (Step 6), not yet implemented, and in the meantime by
+    // TenderHarness (test-only); already read by `_evaluate`/`settlementOf`, so forge-lint's
+    // uninitialized-state check cannot yet see a writer.
     // forge-lint: disable-next-line(uninitialized-state)
     bool internal _cancelledByPE;
     // forge-lint: disable-next-line(uninitialized-state)
@@ -107,9 +117,7 @@ contract Tender is ReentrancyGuard {
     // forge-lint: disable-next-line(uninitialized-state)
     address internal _winner;
     uint256 internal _activeBidCount;
-    // forge-lint: disable-next-line(uninitialized-state)
     uint256 internal _unresolvedCount;
-    // forge-lint: disable-next-line(uninitialized-state)
     uint256 internal _eligibleCount;
     uint256 internal _totalLiabilities;
     /// @dev _hasVoted[bidder][evaluator]
@@ -150,6 +158,20 @@ contract Tender is ReentrancyGuard {
         address indexed bidder, address indexed recipient, uint256 amount, bool forfeited
     );
 
+    event KeyEnvelopePosted(address indexed bidder, bytes32 keyEnvelopeRef);
+    event ConflictDeclared(address indexed evaluator, bytes32 declarationHash);
+    event VoteCast(
+        address indexed evaluator,
+        address indexed bidder,
+        bool eligible,
+        uint8 reasonCode,
+        bytes32 reportHash
+    );
+    event VerdictFinalized(address indexed bidder, bool eligible);
+    event AppealFiled(address indexed bidder, bytes32 complaintHash);
+    event EscalationResolved(address indexed bidder, bool eligible, bytes32 reasonHash);
+    event AppealResolved(address indexed bidder, bool upheld, bytes32 reasonHash);
+
     // ---------------------------------------------------------------------
     // Errors (SPEC §3)
     // ---------------------------------------------------------------------
@@ -178,6 +200,11 @@ contract Tender is ReentrancyGuard {
     error BidExists();
     error TooManyBidders();
     error NothingToSettle();
+    error NotEvaluator();
+    error AlreadyVoted();
+    error InvalidReasonCode(uint8 code);
+    error AppealNotAllowed();
+    error NotAuthority();
 
     /// @notice Deploy one tender. Every parameter is fixed for its lifetime (I7).
     /// @param config Full tender configuration (SPEC §3). Reverts on any validation failure.
@@ -364,6 +391,147 @@ contract Tender is ReentrancyGuard {
         _activeBidCount--;
 
         emit BidWithdrawn(msg.sender);
+    }
+
+    // ---------------------------------------------------------------------
+    // Technical path (SPEC §6.4-6.6, §8)
+    // ---------------------------------------------------------------------
+
+    /// @notice Post the reference to the caller's decryption key envelope, revealing
+    ///         technical documents for evaluation.
+    function postKeyEnvelope(bytes32 keyEnvelopeRef) external {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.TechReveal) revert WrongPhase(phase);
+
+        Bid storage bid = _bids[msg.sender];
+        if (bid.state != BidState.Committed) revert InvalidBidState(bid.state);
+        if (keyEnvelopeRef == bytes32(0)) revert ZeroHash();
+
+        bid.state = BidState.Revealed;
+        bid.keyEnvelopeRef = keyEnvelopeRef;
+        _unresolvedCount++;
+
+        emit KeyEnvelopePosted(msg.sender, keyEnvelopeRef);
+    }
+
+    /// @notice Record an evaluator's conflict-of-interest declaration. Event only: it has
+    ///         no effect on voting or bid state.
+    function declareConflict(bytes32 declarationHash) external {
+        if (!isEvaluator[msg.sender]) revert NotEvaluator();
+
+        // Gated on the derived phase, not a raw timestamp: a cancelled/accepted/otherwise
+        // terminal tender must reject this even if `now < evaluationEnd` still holds.
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Open && phase != Phase.TechReveal && phase != Phase.Evaluation) {
+            revert WrongPhase(phase);
+        }
+
+        emit ConflictDeclared(msg.sender, declarationHash);
+    }
+
+    /// @notice Cast a technical-eligibility vote on `bidder`'s revealed documents.
+    /// @param eligible The evaluator's verdict.
+    /// @param reasonCode Must be `REASON_COMPLIANT` iff `eligible`, else one of the
+    ///        ineligibility codes (SPEC §8).
+    function castVote(address bidder, bool eligible, uint8 reasonCode, bytes32 reportHash)
+        external
+    {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Evaluation) revert WrongPhase(phase);
+        if (!isEvaluator[msg.sender]) revert NotEvaluator();
+
+        Bid storage bid = _bids[bidder];
+        if (bid.state != BidState.Revealed) revert InvalidBidState(bid.state);
+        if (_hasVoted[bidder][msg.sender]) revert AlreadyVoted();
+        if (reportHash == bytes32(0)) revert ZeroHash();
+        if (eligible) {
+            if (reasonCode != REASON_COMPLIANT) revert InvalidReasonCode(reasonCode);
+        } else if (reasonCode < REASON_SPEC_NONCOMPLIANT || reasonCode > REASON_OTHER_DOCUMENTED) {
+            revert InvalidReasonCode(reasonCode);
+        }
+
+        _hasVoted[bidder][msg.sender] = true;
+        if (eligible) {
+            bid.eligibleVotes++;
+        } else {
+            bid.ineligibleVotes++;
+        }
+
+        emit VoteCast(msg.sender, bidder, eligible, reasonCode, reportHash);
+
+        // 2k > n (I3) guarantees at most one of these can ever fire for a given bid.
+        if (bid.eligibleVotes == threshold) {
+            bid.state = BidState.Eligible;
+            _unresolvedCount--;
+            _eligibleCount++;
+            emit VerdictFinalized(bidder, true);
+        } else if (bid.ineligibleVotes == threshold) {
+            bid.state = BidState.Ineligible;
+            _unresolvedCount--;
+            emit VerdictFinalized(bidder, false);
+        }
+    }
+
+    /// @notice File one appeal against the caller's own Ineligible verdict.
+    function fileAppeal(bytes32 complaintHash) external {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.AppealFiling) revert WrongPhase(phase);
+
+        Bid storage bid = _bids[msg.sender];
+        if (bid.state != BidState.Ineligible) revert InvalidBidState(bid.state);
+        if (bid.resolvedByAuthority || bid.appealed) revert AppealNotAllowed();
+        if (complaintHash == bytes32(0)) revert ZeroHash();
+
+        bid.state = BidState.Appealed;
+        bid.appealed = true;
+        _unresolvedCount++;
+
+        emit AppealFiled(msg.sender, complaintHash);
+    }
+
+    /// @notice Resolve a bid left Revealed past `evaluationEnd` (Escalated, derived §4).
+    ///         Authority only; not appealable (SPEC §6.6).
+    function resolveEscalation(address bidder, bool eligible, bytes32 reasonHash) external {
+        if (msg.sender != appealsAuthority) revert NotAuthority();
+        _requireAuthorityWindow();
+
+        Bid storage bid = _bids[bidder];
+        if (bid.state != BidState.Revealed) revert InvalidBidState(bid.state);
+        if (reasonHash == bytes32(0)) revert ZeroHash();
+
+        bid.state = eligible ? BidState.Eligible : BidState.Ineligible;
+        bid.resolvedByAuthority = true;
+        _unresolvedCount--;
+        if (eligible) _eligibleCount++;
+
+        emit EscalationResolved(bidder, eligible, reasonHash);
+    }
+
+    /// @notice Resolve an appeal filed against an Ineligible verdict. Authority only.
+    function resolveAppeal(address bidder, bool upheld, bytes32 reasonHash) external {
+        if (msg.sender != appealsAuthority) revert NotAuthority();
+        _requireAuthorityWindow();
+
+        Bid storage bid = _bids[bidder];
+        if (bid.state != BidState.Appealed) revert InvalidBidState(bid.state);
+        if (reasonHash == bytes32(0)) revert ZeroHash();
+
+        bid.state = upheld ? BidState.Eligible : BidState.Ineligible;
+        _unresolvedCount--;
+        if (upheld) _eligibleCount++;
+
+        emit AppealResolved(bidder, upheld, reasonHash);
+    }
+
+    /// @dev Authority actions are allowed only during phases AppealFiling or
+    ///      AppealResolution — a two-phase window checked against the derived phase
+    ///      itself (not raw timestamps), so a cancelled/accepted/Failed tender is
+    ///      correctly rejected even when `evaluationEnd <= now < priceRevealStart` holds.
+    function _requireAuthorityWindow() internal view {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.AppealFiling && phase != Phase.AppealResolution) {
+            revert WrongPhase(phase);
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -608,6 +776,11 @@ contract Tender is ReentrancyGuard {
     /// @notice Total deposit liabilities the contract currently owes bidders (I1).
     function totalLiabilities() external view returns (uint256) {
         return _totalLiabilities;
+    }
+
+    /// @notice Whether `evaluator` has already voted on `bidder`'s bid.
+    function hasVoted(address bidder, address evaluator) external view returns (bool) {
+        return _hasVoted[bidder][evaluator];
     }
 
     /// @notice The tender's fixed schedule.
