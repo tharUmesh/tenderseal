@@ -75,6 +75,16 @@ contract TenderHandler is Test {
     mapping(address => uint8) public shadow_ineligibleVotes;
     mapping(address => bool) public shadow_settled;
 
+    /// @dev Set only via `recordDebarredBeforeCutoff`, never by the handler's own random
+    ///      action set (it never calls `registry.debarVendor` -- debarment is exercised
+    ///      by the CP3/CP4 checkpoint suites calling the real registry directly). Needed
+    ///      so `_shadowClassify`/`_shadowRanking` stay faithful to SPEC §7/§9 once a
+    ///      checkpoint bidder is debarred: without it, a debarred Eligible bidder would be
+    ///      mis-classified as F2/F3-forfeitable instead of Refund, producing a false I2
+    ///      (`ghost_forfeitMismatches`) failure that is a bug in the shadow model, not the
+    ///      contract.
+    mapping(address => bool) public shadow_debarredBeforeCutoff;
+
     uint256 public shadow_activeBidCount;
     uint256 public shadow_unresolvedCount;
     uint256 public shadow_eligibleCount;
@@ -141,6 +151,15 @@ contract TenderHandler is Test {
 
     function bidders() external view returns (address[] memory) {
         return _bidders;
+    }
+
+    /// @dev Called by a checkpoint suite right after it debars `bidder`'s vendor through
+    ///      the real `VendorRegistry.debarVendor` (before `priceRevealStart`), so the
+    ///      shadow model's F2/F3/ranking logic accounts for it. Not part of the handler's
+    ///      own randomized action set and not a `targetContract` -- it is never called by
+    ///      the fuzzer itself.
+    function recordDebarredBeforeCutoff(address bidder) external {
+        shadow_debarredBeforeCutoff[bidder] = true;
     }
 
     // ---- Shared bookkeeping -------------------------------------------------
@@ -463,7 +482,13 @@ contract TenderHandler is Test {
 
     // ---- Cancellation (SPEC §6.7) -------------------------------------------------
 
-    function cancel(uint256 codeSeed) external tracked {
+    /// @dev Gated to ~5% of attempts (Step 7d, item 2): PE-cancel is an absorbing action
+    ///      (Cancelled is terminal), so giving it the same per-call odds as every other
+    ///      action collapses most runs early and starves every later-phase invariant
+    ///      (I4, I5, I9, I12, F2/F3 settlement) of coverage. `gateSeed` and `codeSeed` are
+    ///      independent draws so gating doesn't skew which cancel reason code gets picked.
+    function cancel(uint256 gateSeed, uint256 codeSeed) external tracked {
+        if (bound(gateSeed, 0, 99) >= 5) return;
         uint8 code = uint8(bound(codeSeed, 1, 4));
         vm.prank(pe);
         try tender.cancel(code, keccak256("cancel-reason")) {
@@ -574,7 +599,10 @@ contract TenderHandler is Test {
                 : (Settlement.Refund, uint8(0));
         }
 
-        if (state == BidState.Eligible && !shadow_opened[bidder]) {
+        if (
+            state == BidState.Eligible && !shadow_opened[bidder]
+                && !shadow_debarredBeforeCutoff[bidder]
+        ) {
             if (
                 cause == TerminalCause.NoRankedBids || cause == TerminalCause.AllOffersLapsed
                     || cause == TerminalCause.AwardAccepted
@@ -634,7 +662,10 @@ contract TenderHandler is Test {
         uint256 count;
         for (uint256 i = 0; i < len; i++) {
             address b = _bidders[i];
-            if (shadow_state[b] == BidState.Eligible && shadow_opened[b]) {
+            if (
+                shadow_state[b] == BidState.Eligible && shadow_opened[b]
+                    && !shadow_debarredBeforeCutoff[b]
+            ) {
                 candidates[count++] = b;
             }
         }
