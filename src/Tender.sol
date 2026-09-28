@@ -105,16 +105,9 @@ contract Tender is ReentrancyGuard {
 
     address[] internal _bidders;
     mapping(address => Bid) internal _bids;
-    // Written by cancel/acceptAward (Step 6), not yet implemented, and in the meantime by
-    // TenderHarness (test-only); already read by `_evaluate`/`settlementOf`, so forge-lint's
-    // uninitialized-state check cannot yet see a writer.
-    // forge-lint: disable-next-line(uninitialized-state)
     bool internal _cancelledByPE;
-    // forge-lint: disable-next-line(uninitialized-state)
     uint64 internal _cancelledAt;
-    // forge-lint: disable-next-line(uninitialized-state)
     bool internal _accepted;
-    // forge-lint: disable-next-line(uninitialized-state)
     address internal _winner;
     uint256 internal _activeBidCount;
     uint256 internal _unresolvedCount;
@@ -172,6 +165,11 @@ contract Tender is ReentrancyGuard {
     event EscalationResolved(address indexed bidder, bool eligible, bytes32 reasonHash);
     event AppealResolved(address indexed bidder, bool upheld, bytes32 reasonHash);
 
+    event TenderCancelled(uint8 reasonCode, bytes32 reasonHash);
+    event PriceRevealed(address indexed bidder, uint256 price);
+    event AwardAccepted(address indexed bidder, uint256 round, uint256 price);
+    event AwardAcknowledged(address indexed winner);
+
     // ---------------------------------------------------------------------
     // Errors (SPEC §3)
     // ---------------------------------------------------------------------
@@ -205,6 +203,10 @@ contract Tender is ReentrancyGuard {
     error InvalidReasonCode(uint8 code);
     error AppealNotAllowed();
     error NotAuthority();
+    error NotPE();
+    error AlreadyOpened();
+    error InvalidOpening();
+    error NotCurrentOfferee();
 
     /// @notice Deploy one tender. Every parameter is fixed for its lifetime (I7).
     /// @param config Full tender configuration (SPEC §3). Reverts on any validation failure.
@@ -535,6 +537,38 @@ contract Tender is ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
+    // Cancellation (SPEC §6.7)
+    // ---------------------------------------------------------------------
+
+    /// @notice Cancel the tender. PE only.
+    /// @param reasonCode In Open: 1-4. While prices are still sealed (TechReveal,
+    ///        Evaluation, AppealFiling, AppealResolution): 1-3 only. Disallowed in every
+    ///        other phase.
+    function cancel(uint8 reasonCode, bytes32 reasonHash) external {
+        if (msg.sender != pe) revert NotPE();
+
+        (Phase phase,) = _evaluate();
+        if (phase == Phase.Open) {
+            if (reasonCode == 0 || reasonCode > 4) revert InvalidReasonCode(reasonCode);
+        } else if (
+            phase == Phase.TechReveal || phase == Phase.Evaluation || phase == Phase.AppealFiling
+                || phase == Phase.AppealResolution
+        ) {
+            if (reasonCode == 0 || reasonCode > 3) revert InvalidReasonCode(reasonCode);
+        } else {
+            revert WrongPhase(phase);
+        }
+        if (reasonHash == bytes32(0)) revert ZeroHash();
+
+        _cancelledByPE = true;
+        // casting to uint64 is safe: block timestamps fit in uint64 for ~584 billion years
+        // forge-lint: disable-next-line(unsafe-typecast)
+        _cancelledAt = uint64(block.timestamp);
+
+        emit TenderCancelled(reasonCode, reasonHash);
+    }
+
+    // ---------------------------------------------------------------------
     // Phase (SPEC §4) — never stored, always derived
     // ---------------------------------------------------------------------
 
@@ -582,6 +616,32 @@ contract Tender is ReentrancyGuard {
     }
 
     // ---------------------------------------------------------------------
+    // Price reveal (SPEC §6.8, §5)
+    // ---------------------------------------------------------------------
+
+    /// @notice Open `bidder`'s price commitment. Callable by anyone (the salt is public
+    ///         once revealed here regardless of who submits it).
+    /// @param price The bid price in the deposit token's base units (SPEC §5).
+    /// @param salt The 256-bit salt used in the original commitment.
+    function revealPrice(address bidder, uint256 price, bytes32 salt) external {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.PriceReveal) revert WrongPhase(phase);
+
+        Bid storage bid = _bids[bidder];
+        if (bid.state != BidState.Eligible) revert InvalidBidState(bid.state);
+        if (bid.opened) revert AlreadyOpened();
+
+        bytes32 expected =
+            keccak256(abi.encode(block.chainid, address(this), bidder, price, bid.docHash, salt));
+        if (price == 0 || expected != bid.priceCommitment) revert InvalidOpening();
+
+        bid.opened = true;
+        bid.price = price;
+
+        emit PriceRevealed(bidder, price);
+    }
+
+    // ---------------------------------------------------------------------
     // Ranking and offer rounds (SPEC §5)
     // ---------------------------------------------------------------------
 
@@ -624,11 +684,7 @@ contract Tender is ReentrancyGuard {
     }
 
     /// @notice The current offer round, if any (SPEC §5). `round` is 1-based; 0 if none.
-    function currentOffer()
-        external
-        view
-        returns (uint256 round, address offeree, uint64 windowEnd)
-    {
+    function currentOffer() public view returns (uint256 round, address offeree, uint64 windowEnd) {
         // casting to uint64 is safe: block timestamps fit in uint64 for ~584 billion years
         // forge-lint: disable-next-line(unsafe-typecast)
         uint64 t = uint64(block.timestamp);
@@ -664,6 +720,34 @@ contract Tender is ReentrancyGuard {
             if (list[i] == target) return i;
         }
         return len;
+    }
+
+    // ---------------------------------------------------------------------
+    // Award (SPEC §6.9)
+    // ---------------------------------------------------------------------
+
+    /// @notice Accept the current offer. Only the current offeree may call this.
+    function acceptAward() external {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Acceptance) revert WrongPhase(phase);
+
+        (uint256 round, address offeree,) = currentOffer();
+        if (msg.sender != offeree) revert NotCurrentOfferee();
+
+        _accepted = true;
+        _winner = msg.sender;
+
+        emit AwardAccepted(msg.sender, round, _bids[msg.sender].price);
+    }
+
+    /// @notice Acknowledge the award. PE only, event only.
+    function acknowledgeAward() external {
+        if (msg.sender != pe) revert NotPE();
+
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Final) revert WrongPhase(phase);
+
+        emit AwardAcknowledged(_winner);
     }
 
     // ---------------------------------------------------------------------
@@ -776,6 +860,11 @@ contract Tender is ReentrancyGuard {
     /// @notice Total deposit liabilities the contract currently owes bidders (I1).
     function totalLiabilities() external view returns (uint256) {
         return _totalLiabilities;
+    }
+
+    /// @notice The accepted bidder, or the zero address before an award is accepted.
+    function winner() external view returns (address) {
+        return _winner;
     }
 
     /// @notice Whether `evaluator` has already voted on `bidder`'s bid.
