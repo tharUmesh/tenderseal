@@ -2,6 +2,8 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {VendorRegistry} from "./VendorRegistry.sol";
 import {Bid, BidState, Phase, TerminalCause} from "./TenderTypes.sol";
 
@@ -12,7 +14,9 @@ import {Bid, BidState, Phase, TerminalCause} from "./TenderTypes.sol";
 /// @dev See docs/SPEC.md (source of truth). Parameters are fixed at creation (I7). The
 ///      phase is never stored: it is computed on demand by `_evaluate` from the current
 ///      time and recorded facts (SPEC §4).
-contract Tender {
+contract Tender is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
     // ---------------------------------------------------------------------
     // Constants
     // ---------------------------------------------------------------------
@@ -88,20 +92,18 @@ contract Tender {
     // `internal` (not `private`) so the test-only TenderHarness can set them directly.
     // ---------------------------------------------------------------------
 
-    // These are written by Step 3-6 functions (commit, castVote, resolveAppeal, ...) not
-    // yet implemented, and in the meantime by TenderHarness (test-only); already read by
-    // `_evaluate`/`rankedCount` in this step, so forge-lint's uninitialized-state check
-    // cannot yet see a writer.
-    // forge-lint: disable-next-line(uninitialized-state)
     address[] internal _bidders;
     mapping(address => Bid) internal _bids;
+    // Written by castVote/resolveEscalation/resolveAppeal/cancel (Steps 5-6), not yet
+    // implemented, and in the meantime by TenderHarness (test-only); already read by
+    // `_evaluate` in this step, so forge-lint's uninitialized-state check cannot yet see
+    // a writer.
     // forge-lint: disable-next-line(uninitialized-state)
     bool internal _cancelledByPE;
     uint64 internal _cancelledAt;
     // forge-lint: disable-next-line(uninitialized-state)
     bool internal _accepted;
     address internal _winner;
-    // forge-lint: disable-next-line(uninitialized-state)
     uint256 internal _activeBidCount;
     // forge-lint: disable-next-line(uninitialized-state)
     uint256 internal _unresolvedCount;
@@ -131,6 +133,18 @@ contract Tender {
         uint64 createdAt
     );
 
+    event BidCommitted(
+        address indexed bidder,
+        uint64 indexed vendorId,
+        bytes32 priceCommitment,
+        bytes32 docHash,
+        bytes32 docCipherRef
+    );
+    event CommitmentReplaced(
+        address indexed bidder, bytes32 priceCommitment, bytes32 docHash, bytes32 docCipherRef
+    );
+    event BidWithdrawn(address indexed bidder);
+
     // ---------------------------------------------------------------------
     // Errors (SPEC §3)
     // ---------------------------------------------------------------------
@@ -146,6 +160,18 @@ contract Tender {
     error InvalidDeposit();
     error InvalidMaxBidders(uint256 maxBidders);
     error InvalidSchedule(uint8 check);
+
+    // ---------------------------------------------------------------------
+    // Errors (SPEC §6)
+    // ---------------------------------------------------------------------
+
+    error WrongPhase(Phase actual);
+    error InvalidBidState(BidState actual);
+    error NotRegisteredVendor();
+    error RegisteredTooLate(uint64 vendorId);
+    error VendorIsDebarred(uint64 vendorId);
+    error BidExists();
+    error TooManyBidders();
 
     /// @notice Deploy one tender. Every parameter is fixed for its lifetime (I7).
     /// @param config Full tender configuration (SPEC §3). Reverts on any validation failure.
@@ -249,6 +275,92 @@ contract Tender {
     }
 
     // ---------------------------------------------------------------------
+    // Bidding (SPEC §6.1-6.3)
+    // ---------------------------------------------------------------------
+
+    /// @notice Commit a salted price commitment and technical documents, locking a deposit.
+    /// @param priceCommitment keccak256(abi.encode(chainid, this, bidder, price, docHash, salt)).
+    /// @param docHash Hash of the (encrypted) technical documents.
+    /// @param docCipherRef Reference to where the encrypted documents can be fetched.
+    function commit(bytes32 priceCommitment, bytes32 docHash, bytes32 docCipherRef)
+        external
+        nonReentrant
+    {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Open) revert WrongPhase(phase);
+
+        uint64 vendorId = registry.vendorIdOf(msg.sender);
+        if (vendorId == 0) revert NotRegisteredVendor();
+        if (!registry.isRegisteredBefore(vendorId, createdAt)) revert RegisteredTooLate(vendorId);
+        if (registry.isDebarred(vendorId)) revert VendorIsDebarred(vendorId);
+
+        if (_bids[msg.sender].state != BidState.None) revert BidExists();
+        if (_bidders.length >= maxBidders) revert TooManyBidders();
+        if (priceCommitment == bytes32(0) || docHash == bytes32(0) || docCipherRef == bytes32(0)) {
+            revert ZeroHash();
+        }
+
+        _bids[msg.sender] = Bid({
+            vendorId: vendorId,
+            state: BidState.Committed,
+            priceCommitment: priceCommitment,
+            docHash: docHash,
+            docCipherRef: docCipherRef,
+            keyEnvelopeRef: bytes32(0),
+            eligibleVotes: 0,
+            ineligibleVotes: 0,
+            resolvedByAuthority: false,
+            appealed: false,
+            opened: false,
+            settled: false,
+            price: 0
+        });
+        _bidders.push(msg.sender);
+        _activeBidCount++;
+        _totalLiabilities += depositAmount;
+
+        token.safeTransferFrom(msg.sender, address(this), depositAmount);
+
+        emit BidCommitted(msg.sender, vendorId, priceCommitment, docHash, docCipherRef);
+    }
+
+    /// @notice Replace the caller's price commitment and technical documents. The deposit
+    ///         already posted is unaffected.
+    function replaceCommitment(bytes32 priceCommitment, bytes32 docHash, bytes32 docCipherRef)
+        external
+    {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Open) revert WrongPhase(phase);
+
+        Bid storage bid = _bids[msg.sender];
+        if (bid.state != BidState.Committed) revert InvalidBidState(bid.state);
+        if (priceCommitment == bytes32(0) || docHash == bytes32(0) || docCipherRef == bytes32(0)) {
+            revert ZeroHash();
+        }
+
+        bid.priceCommitment = priceCommitment;
+        bid.docHash = docHash;
+        bid.docCipherRef = docCipherRef;
+
+        emit CommitmentReplaced(msg.sender, priceCommitment, docHash, docCipherRef);
+    }
+
+    /// @notice Withdraw the caller's bid. The deposit becomes immediately refundable
+    ///         (see `settlementOf`, SPEC §7).
+    function withdraw() external {
+        (Phase phase,) = _evaluate();
+        if (phase != Phase.Open) revert WrongPhase(phase);
+
+        Bid storage bid = _bids[msg.sender];
+        if (bid.state != BidState.Committed) revert InvalidBidState(bid.state);
+
+        bid.state = BidState.Withdrawn;
+        _activeBidCount--;
+
+        emit BidWithdrawn(msg.sender);
+    }
+
+    // ---------------------------------------------------------------------
     // Phase (SPEC §4) — never stored, always derived
     // ---------------------------------------------------------------------
 
@@ -334,6 +446,11 @@ contract Tender {
     /// @notice Number of evaluators (n).
     function evaluatorCount() external view returns (uint256) {
         return _evaluators.length;
+    }
+
+    /// @notice Total deposit liabilities the contract currently owes bidders (I1).
+    function totalLiabilities() external view returns (uint256) {
+        return _totalLiabilities;
     }
 
     /// @notice The tender's fixed schedule.

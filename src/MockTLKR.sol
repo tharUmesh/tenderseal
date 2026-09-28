@@ -9,7 +9,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// @dev In a real deployment the bid security would be a bank guarantee or a regulated
 ///      stable-value instrument; this token only models the accounting. 2 decimals (cents).
 contract MockTLKR is ERC20, Ownable {
-    constructor(address initialOwner) ERC20("Test Sri Lankan Rupee", "tLKR") Ownable(initialOwner) {}
+    constructor(address initialOwner)
+        ERC20("Test Sri Lankan Rupee", "tLKR")
+        Ownable(initialOwner)
+    {}
 
     function decimals() public pure override returns (uint8) {
         return 2;

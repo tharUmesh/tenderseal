@@ -50,6 +50,7 @@ test/
   MockTLKR.t.sol
   Tender.t.sol            constructor / configuration validation
   TenderPhase.t.sol       currentPhase / terminalCause / rankedCount
+  TenderCommit.t.sol      commit / replaceCommitment / withdraw
   utils/TenderTestBase.sol   shared fixture (actors, registry, token, default config)
   harness/TenderHarness.sol  TEST-ONLY setters for recorded facts
 ```
@@ -58,7 +59,7 @@ test/
 
 - [x] Step 1 — Toolchain, VendorRegistry, MockTLKR (25 tests)
 - [x] Step 2 — Types, configuration, phase function
-- [ ] Step 3 — Money in: commit / replace / withdraw
+- [x] Step 3 — Money in: commit / replace / withdraw
 - [ ] Step 4 — Money out: ranking, offer rounds, settlement
 - [ ] Step 5 — Technical path
 - [ ] Step 6 — Price, award, cancellation
