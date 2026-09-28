@@ -79,6 +79,8 @@ contract VendorRegistry is AccessControl {
         if (existing != 0) revert IdentityAlreadyRegistered(identityHash, existing);
 
         vendorId = _nextId++;
+        // casting to uint64 is safe: block timestamps fit in uint64 for ~584 billion years
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint64 nowTs = uint64(block.timestamp);
 
         _vendors[vendorId] = Vendor({
@@ -104,6 +106,8 @@ contract VendorRegistry is AccessControl {
         if (v.registeredAt == 0) revert UnknownVendor(vendorId);
         if (v.debarredAt != 0) revert AlreadyDebarred(vendorId, v.debarredAt);
 
+        // casting to uint64 is safe: block timestamps fit in uint64 for ~584 billion years
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint64 nowTs = uint64(block.timestamp);
         v.debarredAt = nowTs;
         v.debarReasonHash = reasonHash;

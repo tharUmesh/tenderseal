@@ -25,3 +25,7 @@ fail_on_revert = false
 
 [fmt]
 line_length = 100
+
+[lint]
+# We keep readable getter names (t.pe(), t.registry()) for immutables.
+exclude_lints = ["screaming-snake-case-immutable", "mixed-case-variable", "mixed-case-function"]

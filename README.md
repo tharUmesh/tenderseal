@@ -43,22 +43,28 @@ forge coverage                 # line/branch coverage
 src/
   VendorRegistry.sol   vendor IDs, registration cutoff (I8), debarment timestamps (I9)
   MockTLKR.sol         test LKR token (2 decimals) used for bid securities
+  TenderTypes.sol      shared enums (Phase, BidState, TerminalCause, Settlement) and Bid struct
+  Tender.sol           one sealed-bid tender: config, immutables, derived phase (SPEC §3-4)
 test/
   VendorRegistry.t.sol
   MockTLKR.t.sol
+  Tender.t.sol            constructor / configuration validation
+  TenderPhase.t.sol       currentPhase / terminalCause / rankedCount
+  utils/TenderTestBase.sol   shared fixture (actors, registry, token, default config)
+  harness/TenderHarness.sol  TEST-ONLY setters for recorded facts
 ```
 
 ## Build progress
 
 - [x] Step 1 — Toolchain, VendorRegistry, MockTLKR (25 tests)
-- [ ] Step 2 — Tender types, errors, events, immutable parameters, derived `currentPhase()`
-- [ ] Step 3 — Deposit ledger, entitlement function, `claim()` (I1, I2, I11)
-- [ ] Step 4 — Commit / replace / withdraw
-- [ ] Step 5 — Tech reveal, k-of-n voting, escalation, appeals
-- [ ] Step 6 — Price reveal, ranking, tie-break, offer rounds, cancellation
-- [ ] Step 7 — Invariant suite (I1–I12), boundary and attack tests
-- [ ] Step 8 — TenderFactory, deployment scripts, Sepolia
-- [ ] Step 9 — Off-chain tools, verifier CLI, minimal UI
+- [x] Step 2 — Types, configuration, phase function
+- [ ] Step 3 — Money in: commit / replace / withdraw
+- [ ] Step 4 — Money out: ranking, offer rounds, settlement
+- [ ] Step 5 — Technical path
+- [ ] Step 6 — Price, award, cancellation
+- [ ] Step 7 — Security evidence
+- [ ] Step 8 — Factory and deployment
+- [ ] Step 9 — Off-chain tools (TypeScript + viem) and minimal UI
 
 ## Registry design notes
 

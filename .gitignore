@@ -9,6 +9,8 @@ out/
 
 # Docs
 docs/
+CLAUDE.md
 
 # Dotenv file
 .env
+
