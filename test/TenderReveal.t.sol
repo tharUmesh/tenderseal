@@ -21,6 +21,7 @@ contract TenderRevealTest is TenderTestBase {
     uint256 internal constant PRICE = 12_345;
 
     uint8 internal constant REASON_COMPLIANT = 1;
+    uint8 internal constant REASON_SPEC_NONCOMPLIANT = 2;
 
     event PriceRevealed(address indexed bidder, uint256 price);
 
@@ -91,10 +92,14 @@ contract TenderRevealTest is TenderTestBase {
         vm.warp(tender.priceRevealStart());
 
         address stranger = makeAddr("stranger");
+        vm.expectEmit(true, false, false, true);
+        emit PriceRevealed(bidder1, PRICE); // attributed to the bidder, not the caller
         vm.prank(stranger);
         tender.revealPrice(bidder1, PRICE, SALT);
 
-        assertTrue(tender.getBid(bidder1).opened);
+        Bid memory bid = tender.getBid(bidder1);
+        assertTrue(bid.opened);
+        assertEq(bid.price, PRICE);
     }
 
     // ==================================================================
@@ -237,10 +242,11 @@ contract TenderRevealTest is TenderTestBase {
         tender.revealPrice(bidder1, PRICE, SALT);
     }
 
-    function test_RevealPrice_RevertsWhenNotEligible() public {
-        // bidder1 commits but never reveals its key envelope, staying Committed forever.
-        // A second, genuinely eligible bidder keeps the tender progressing into
-        // PriceReveal instead of collapsing to Cancelled/NoEligibleBids.
+    function test_RevealPrice_RevertsWhenNotEligible_Committed() public {
+        // bidder1 commits but never reveals its key envelope, staying Committed forever
+        // (the derived F1 / ForfeitedF1 status). A second, genuinely eligible bidder
+        // keeps the tender progressing into PriceReveal instead of collapsing to
+        // Cancelled/NoEligibleBids.
         vm.prank(bidder1);
         tender.commit(_commitment(bidder1, PRICE, DOC_HASH, SALT), DOC_HASH, DOC_CIPHER_REF);
 
@@ -249,6 +255,43 @@ contract TenderRevealTest is TenderTestBase {
 
         vm.warp(tender.priceRevealStart());
         vm.expectRevert(abi.encodeWithSelector(Tender.InvalidBidState.selector, BidState.Committed));
+        tender.revealPrice(bidder1, PRICE, SALT);
+    }
+
+    function test_RevealPrice_RevertsWhenNotEligible_Ineligible() public {
+        // Both bidders are committed first (while still Open), then revealed and voted
+        // together: bidder1 -> Ineligible (2 of 3 vote ineligible), bidder2 -> Eligible,
+        // which keeps the tender progressing into PriceReveal.
+        bytes32 commitment1 = _commitment(bidder1, PRICE, DOC_HASH, SALT);
+        bytes32 commitment2 = _commitment(bidder2, PRICE + 1, DOC_HASH, keccak256("salt2"));
+
+        vm.prank(bidder1);
+        tender.commit(commitment1, DOC_HASH, DOC_CIPHER_REF);
+        vm.prank(bidder2);
+        tender.commit(commitment2, DOC_HASH, DOC_CIPHER_REF);
+
+        vm.warp(tender.submissionDeadline());
+        vm.prank(bidder1);
+        tender.postKeyEnvelope(KEY_ENV_REF);
+        vm.prank(bidder2);
+        tender.postKeyEnvelope(KEY_ENV_REF);
+
+        vm.warp(tender.techRevealEnd());
+        vm.prank(eval1);
+        tender.castVote(bidder1, false, REASON_SPEC_NONCOMPLIANT, REPORT_HASH);
+        vm.prank(eval2);
+        tender.castVote(bidder1, false, REASON_SPEC_NONCOMPLIANT, REPORT_HASH);
+        vm.prank(eval1);
+        tender.castVote(bidder2, true, REASON_COMPLIANT, REPORT_HASH);
+        vm.prank(eval2);
+        tender.castVote(bidder2, true, REASON_COMPLIANT, REPORT_HASH);
+
+        assertEq(uint256(tender.getBid(bidder1).state), uint256(BidState.Ineligible));
+
+        vm.warp(tender.priceRevealStart());
+        vm.expectRevert(
+            abi.encodeWithSelector(Tender.InvalidBidState.selector, BidState.Ineligible)
+        );
         tender.revealPrice(bidder1, PRICE, SALT);
     }
 

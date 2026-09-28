@@ -114,6 +114,19 @@ contract TenderTest is TenderTestBase {
         assertEq(uint256(t.getBid(eval1).state), uint256(0)); // BidState.None
     }
 
+    function test_Schedule_ReturnsFullStructMatchingImmutables() public {
+        Tender t = new Tender(_defaultConfig());
+        Tender.Schedule memory s = t.schedule();
+
+        assertEq(s.submissionDeadline, t.submissionDeadline());
+        assertEq(s.techRevealEnd, t.techRevealEnd());
+        assertEq(s.evaluationEnd, t.evaluationEnd());
+        assertEq(s.appealFilingEnd, t.appealFilingEnd());
+        assertEq(s.priceRevealStart, t.priceRevealStart());
+        assertEq(s.priceRevealEnd, t.priceRevealEnd());
+        assertEq(s.acceptanceWindow, t.acceptanceWindow());
+    }
+
     function test_Constructor_AcceptsExactMinimumWindows() public {
         Tender.TenderConfig memory config = _defaultConfig();
         config.schedule = _minSchedule();

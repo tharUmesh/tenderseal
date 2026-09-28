@@ -58,8 +58,14 @@ test/
   TenderReveal.t.sol      revealPrice: commitment verification (SPEC §6.8, §5)
   TenderCancel.t.sol      cancel: phase x reason-code matrix (SPEC §6.7)
   TenderAward.t.sol       acceptAward / acknowledgeAward (SPEC §6.9)
+  TenderScenarios.t.sol   end-to-end: full lifecycle, appeal changes winner, ring attack
+  TenderReentrancy.t.sol  malicious-token reentrancy into commit/settle
+  TenderGas.t.sol         gas benchmarks: creation, 20-bidder flow, n=3 vs n=5
+  MaliciousReentrantToken.sol   TEST-ONLY ERC20 with an "arm one reentrant call" hook
   utils/TenderTestBase.sol   shared fixture (actors, registry, token, default config)
   harness/TenderHarness.sol  TEST-ONLY setters for recorded facts
+  invariant/TenderHandler.sol       bounded actors/actions/time warps + ghost ledger
+  invariant/TenderInvariants.t.sol  invariant_I1 .. invariant_I12 (SPEC §9)
 ```
 
 ## Build progress
@@ -70,7 +76,7 @@ test/
 - [x] Step 4 — Money out: ranking, offer rounds, settlement
 - [x] Step 5 — Technical path
 - [x] Step 6 — Price, award, cancellation
-- [ ] Step 7 — Security evidence
+- [x] Step 7 — Security evidence
 - [ ] Step 8 — Factory and deployment
 - [ ] Step 9 — Off-chain tools (TypeScript + viem) and minimal UI
 
