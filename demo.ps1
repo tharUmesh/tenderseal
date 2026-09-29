@@ -53,14 +53,43 @@ function Advance-Time($seconds) {
 # script for a call that's SUPPOSED to revert).
 $AnvilMnemonic = "test test test test test test test test test test test junk"
 
+# Phase enum order (src/TenderTypes.sol) -- index == the ordinal WrongPhase(uint8) reverts
+# with, so this only needs updating if that enum's order ever changes.
+$PhaseNames = @(
+    "Open", "TechReveal", "Evaluation", "AppealFiling", "AppealResolution",
+    "PriceReveal", "Acceptance", "Final", "Cancelled", "Failed"
+)
+
 function Invoke-LateCommitDemo {
     $state = Get-Content "script/demo/.demo-state.json" | ConvertFrom-Json
     $lateKey = & $Cast wallet private-key --mnemonic $AnvilMnemonic --mnemonic-index 4
     $dummyHash = & $Cast keccak "late-commit-demo"
     Write-Host "Attempting a commit after submissionDeadline (expected to revert on-chain) ..." -ForegroundColor Yellow
-    & $Cast send $state.tender "commit(bytes32,bytes32,bytes32)" $dummyHash $dummyHash $dummyHash `
-        --rpc-url $RpcUrl --private-key $lateKey
-    Write-Host "(the WrongPhase revert above is expected -- deadlines are chain-time enforced, SPEC claim 2)" -ForegroundColor Yellow
+
+    # `2>&1` on a native exe wraps each stderr line as a NativeCommandError under
+    # $ErrorActionPreference = "Stop" (PS 5.1), which would abort this whole script for a
+    # revert we expect -- so it's scoped to "Continue" just for this one capture.
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $output = & $Cast send $state.tender "commit(bytes32,bytes32,bytes32)" $dummyHash $dummyHash $dummyHash `
+        --rpc-url $RpcUrl --private-key $lateKey 2>&1 | Out-String
+    $ErrorActionPreference = $previousErrorActionPreference
+    Write-Host $output
+
+    # cast already decodes the custom error's selector using this project's compiled ABI
+    # (e.g. "...: WrongPhase(1)"); pull out just the phase ordinal and map it to its name.
+    $match = [regex]::Match($output, "WrongPhase\((\d+)\)")
+    if ($match.Success) {
+        $phaseNum = [int]$match.Groups[1].Value
+        $phaseName = if ($phaseNum -ge 0 -and $phaseNum -lt $PhaseNames.Length) {
+            $PhaseNames[$phaseNum]
+        } else {
+            "Unknown($phaseNum)"
+        }
+        Write-Host "Rejected: WrongPhase($phaseName) -- submission deadline has passed" -ForegroundColor Yellow
+    } else {
+        Write-Host "Rejected as expected -- deadlines are chain-time enforced (SPEC claim 2)" -ForegroundColor Yellow
+    }
 }
 
 Write-Stage "Checking Anvil is reachable at $RpcUrl ..."

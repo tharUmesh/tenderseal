@@ -23,6 +23,7 @@ remappings = [
 fs_permissions = [
   { access = "read-write", path = "./test/invariant/.phase-reach-log.csv" },
   { access = "read-write", path = "./script/demo/.demo-state.json" },
+  { access = "read", path = "./tools/fixtures/commitment-vector.json" },
 ]
 
 [fuzz]

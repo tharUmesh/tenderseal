@@ -1,0 +1,10 @@
+{
+  "description": "Cross-language test vector (Step 9a item 1): computeCommitment() in TS must equal keccak256(abi.encode(...)) in Solidity for these exact inputs.",
+  "chainId": "31337",
+  "tender": "0x55Ad129c73B55B0Cd653857353d20289a98D1d78",
+  "bidder": "0xfBA5e4B7a003F438AfBdF6ac1bb4679845866278",
+  "price": "123456789",
+  "docHash": "0xadda11e723c18742d33c83ac59c6c82356dd564c31132c857ab266b62603d69f",
+  "salt": "0xe198ef2b6606108c04a5dbb6bc0adfb2160cb4ad04d584936793806f63531f42",
+  "commitment": "0x633a94e486d245bafb790475e460871c165513f159ecdfdf28492d2294ab8c57"
+}

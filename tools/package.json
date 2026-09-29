@@ -1,0 +1,29 @@
+{
+  "name": "tenderseal-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-chain tools for TenderSeal (SPEC §10 Step 9a): bid receipts, a brute-force salt demo, document encryption, and a public verifier.",
+  "scripts": {
+    "build": "tsc -p .",
+    "receipt": "tsx src/receipt.ts",
+    "bruteforce": "tsx src/bruteforce.ts",
+    "docs:encrypt": "tsx src/docsEncrypt.ts",
+    "docs:decrypt": "tsx src/docsDecrypt.ts",
+    "verify": "tsx src/verify.ts",
+    "gen:vector": "tsx src/genCommitmentVector.ts",
+    "test": "node --import tsx --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "eciesjs": "^0.4.11",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -78,6 +78,77 @@ script/
   DeploySepolia.s.sol     real-network infra deploy (--account keystore, no raw key)
   demo/01_Commit.s.sol .. 07_Settle.s.sol   one script per lifecycle stage (Step 8 item 3)
 demo.ps1                  runs the local demo end to end against a running Anvil node
+tools/                    off-chain tools (Node + TypeScript + viem, Step 9a) -- see below
+```
+
+## Off-chain tools
+
+Node + TypeScript + [viem](https://viem.sh), in `tools/` (SPEC §10 Step 9a). No
+cryptographic primitives are hand-rolled: CSPRNG salts/keys from Node's built-in
+`crypto`, ABI-encoding/hashing from `viem`, AES-256-GCM from Node's built-in
+(OpenSSL-backed) `crypto`, and ECIES key-wrapping from
+[`eciesjs`](https://github.com/ecies/js). Requires `forge build` to have been run at
+least once (the tools read compiled ABIs from `out/`). See
+[tools/README.md](tools/README.md) for the source layout.
+
+```powershell
+cd tools
+npm install
+npm test          # 11 tests: commitment vector, doc-encryption failure modes, brute-force logic
+```
+
+**Bid receipt** — salt + SPEC §5 commitment, written to a private JSON file:
+
+```powershell
+npm run receipt -- --chain-id 31337 --tender 0xTender --bidder 0xBidder `
+  --price 25000000 --doc-hash 0xDocHash
+```
+
+**Cross-language test vector** (critical: a mismatch here would cost a bidder their
+deposit) — `tools/fixtures/commitment-vector.json` is checked into the repo; regenerate
+and reconfirm after touching the commitment formula on either side:
+
+```powershell
+npm run gen:vector                                              # writes the fixture (TS side)
+cd ..; forge test --match-contract CommitmentVectorTest -vv      # re-derives it in Solidity
+```
+
+**Brute-force demo** (SPEC claim 1's caveat: no salt hides nothing) — searches LKR
+1,000,000-25,000,000 for a zero-salt commitment, then estimates the same search with a
+real 256-bit salt:
+
+```powershell
+npm run bruteforce
+```
+
+**Document encryption** (SPEC §6.4, §8) — encrypts a document for a committee of
+evaluators (by default, generates fresh demo keypairs; pass `--evaluator-keys` to use a
+real tender's `evaluatorEncKeys`), then an evaluator decrypts with their own key:
+
+```powershell
+npm run docs:encrypt -- --in path\to\doc.pdf --out-dir out\docs
+npm run docs:decrypt -- --summary out\docs\summary.json --envelopes out\docs\key-envelopes.json `
+  --evaluator-index 0 --private-key 0x<from evaluator-keys.SECRET.json> --out out\docs\decrypted.pdf
+```
+
+**Public verifier** — fetches every event a tender ever emitted and independently
+re-derives §4-§9 from them (never trusting the contract's own derived views for the
+state being checked), printing a PASS/FAIL table:
+
+```powershell
+npm run verify -- --rpc-url http://127.0.0.1:8545 --tender 0xTenderAddress
+```
+
+Run it against the local demo above (`.\demo.ps1` first) for a clean 8/8 PASS. To see it
+catch a real inconsistency, corrupt the deployed tender's own storage directly (Anvil-only
+— `_totalLiabilities` is slot 10) and re-run:
+
+```powershell
+cast rpc anvil_setStorageAt 0xTenderAddress `
+  0x000000000000000000000000000000000000000000000000000000000000000a `
+  0x0000000000000000000000000000000000000000000000000000003b9ac9ff `
+  --rpc-url http://127.0.0.1:8545
+npm run verify -- --rpc-url http://127.0.0.1:8545 --tender 0xTenderAddress   # V8 now FAILs
 ```
 
 ## Deployment
@@ -160,7 +231,9 @@ forge script script/DeploySepolia.s.sol `
 - [x] Step 6 — Price, award, cancellation
 - [x] Step 7 — Security evidence
 - [x] Step 8 — Factory and deployment
-- [ ] Step 9 — Off-chain tools (TypeScript + viem) and minimal UI
+- [x] Step 9a — Off-chain tools (TypeScript + viem): receipts, brute-force demo, document
+      encryption, public verifier
+- [ ] Step 9b — Minimal UI (bidder commit/reveal + public tender view)
 
 ## Registry design notes
 
