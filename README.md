@@ -45,6 +45,7 @@ src/
   MockTLKR.sol         test LKR token (2 decimals) used for bid securities
   TenderTypes.sol      shared enums (Phase, BidState, TerminalCause, Settlement) and Bid struct
   Tender.sol           one sealed-bid tender: config, immutables, derived phase (SPEC §3-4)
+  TenderFactory.sol    deploys Tender instances pinned to one registry/token (SPEC §6.12)
 test/
   VendorRegistry.t.sol
   MockTLKR.t.sol
@@ -58,14 +59,95 @@ test/
   TenderReveal.t.sol      revealPrice: commitment verification (SPEC §6.8, §5)
   TenderCancel.t.sol      cancel: phase x reason-code matrix (SPEC §6.7)
   TenderAward.t.sol       acceptAward / acknowledgeAward (SPEC §6.9)
+  TenderFactory.t.sol     pinned registry/token, pe == msg.sender, records/events (SPEC §6.12)
   TenderScenarios.t.sol   end-to-end: full lifecycle, appeal changes winner, ring attack
   TenderReentrancy.t.sol  malicious-token reentrancy into commit/settle
-  TenderGas.t.sol         gas benchmarks: creation, 20-bidder flow, n=3 vs n=5
+  TenderGas.t.sol         gas benchmarks: creation, 20-bidder flow, n=3 vs n=5, factory
+  ScriptSmoke.t.sol       runs every script/demo/*.s.sol stage end to end (Step 8 item 4)
   MaliciousReentrantToken.sol   TEST-ONLY ERC20 with an "arm one reentrant call" hook
   utils/TenderTestBase.sol   shared fixture (actors, registry, token, default config)
   harness/TenderHarness.sol  TEST-ONLY setters for recorded facts
-  invariant/TenderHandler.sol       bounded actors/actions/time warps + ghost ledger
-  invariant/TenderInvariants.t.sol  invariant_I1 .. invariant_I12 (SPEC §9)
+  invariant/TenderHandler.sol         bounded actors/actions/time warps + ghost ledger
+  invariant/TenderInvariantsBase.sol  shared deployment/logging/invariant_I1..I12 checks
+  invariant/TenderInvariants.t.sol    cold-start invariant suite (SPEC §9)
+  invariant/TenderInvariantsCP1..CP4.t.sol  checkpoint invariant suites (same handler/checks)
+script/
+  DemoConstants.sol       shared Anvil-mnemonic roles + JSON state file read/write helpers
+  DeployLocal.s.sol       local demo deploy 1/2: registry, tLKR, factory, demo vendors
+  CreateDemoTender.s.sol  local demo deploy 2/2: demo tender + funding (separate broadcast)
+  DeploySepolia.s.sol     real-network infra deploy (--account keystore, no raw key)
+  demo/01_Commit.s.sol .. 07_Settle.s.sol   one script per lifecycle stage (Step 8 item 3)
+demo.ps1                  runs the local demo end to end against a running Anvil node
+```
+
+## Deployment
+
+### Local demo (Anvil)
+
+Everything here uses Anvil's well-known default mnemonic
+(`test test test test test test test test test test test junk`) for 10 fixed roles
+(deployer, registrar, PE, appeals authority, treasury, 3 evaluators, 2 demo bidders) — see
+`script/DemoConstants.sol`. Never used beyond `localhost:8545`.
+
+Two terminals, both at the repo root:
+
+```powershell
+# Terminal 1
+anvil
+
+# Terminal 2
+.\demo.ps1
+```
+
+`demo.ps1` runs, in order: `DeployLocal.s.sol` (registry, tLKR, factory, vendor
+registration), `CreateDemoTender.s.sol` (the demo tender + funding — a separate script/
+broadcast from `DeployLocal.s.sol`, since both `registeredAt` and `createdAt` are captured
+from the real on-chain block at broadcast time, and I8 requires `registeredAt < createdAt`
+strictly), then `script/demo/01_Commit.s.sol` through `07_Settle.s.sol`, advancing Anvil's
+clock between stages with `cast rpc evm_increaseTime` / `evm_mine`. It also runs a real
+`cast send` late-commit attempt before stage 2, which reverts on-chain (`WrongPhase`) —
+expected, demonstrating chain-time-enforced deadlines (SPEC claim 2). One demo bidder
+deliberately never reveals its price, so stage 7 shows its deposit forfeited to `treasury`
+(F2) while the winning bidder is refunded.
+
+To run any single stage by hand instead:
+
+```powershell
+forge script script/DeployLocal.s.sol --rpc-url http://127.0.0.1:8545 --broadcast
+```
+
+`test/ScriptSmoke.t.sol` runs the same sequence (via `vm.warp` instead of real time) as an
+ordinary `forge test`, so `forge test` alone verifies every stage script still works.
+
+### Sepolia (real network)
+
+Signs with a Foundry keystore account — **never a raw private key**. Create one once:
+
+```powershell
+cast wallet import tenderseal-deployer --interactive
+# paste the private key when prompted; it's encrypted at rest under ~/.foundry/keystores
+```
+
+Create a `.env` (already gitignored) with the role addresses and your RPC URL, then load it:
+
+```powershell
+# .env
+SEPOLIA_ADMIN=0x...
+SEPOLIA_REGISTRAR=0x...
+SEPOLIA_TREASURY=0x...
+SEPOLIA_RPC_URL=https://...
+
+Get-Content .env | ForEach-Object {
+    if ($_ -match '^\s*([^#=]+)=(.*)$') { Set-Item "env:$($Matches[1])" $Matches[2] }
+}
+```
+
+Deploy (only `VendorRegistry` + `MockTLKR` + `TenderFactory`; the PE creates the actual
+tender afterwards via `TenderFactory.createTender`, e.g. from the Step 9 CLI/UI or `cast send`):
+
+```powershell
+forge script script/DeploySepolia.s.sol `
+  --rpc-url $env:SEPOLIA_RPC_URL --account tenderseal-deployer --broadcast --verify
 ```
 
 ## Build progress
@@ -77,7 +159,7 @@ test/
 - [x] Step 5 — Technical path
 - [x] Step 6 — Price, award, cancellation
 - [x] Step 7 — Security evidence
-- [ ] Step 8 — Factory and deployment
+- [x] Step 8 — Factory and deployment
 - [ ] Step 9 — Off-chain tools (TypeScript + viem) and minimal UI
 
 ## Registry design notes

@@ -14,12 +14,15 @@ remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "forge-std/=lib/forge-std/src/",
 ]
-# Scoped to one scratch file: TenderInvariantsTest.afterInvariant() appends a CSV line
+# Scoped to two scratch files: TenderInvariantsTest.afterInvariant() appends a CSV line
 # per run (console.log alone only surfaces the last run's output), so the agent driving
 # the suite can compute the phase-reach distribution across all runs afterward. Test-only
-# diagnostics; nothing under src/ reads or writes this.
+# diagnostics; nothing under src/ reads or writes this. DemoConstants (Step 8) hands
+# deployed addresses from DeployLocal.s.sol to the script/demo/*.s.sol stage scripts
+# (separate `forge script` processes) through the second file.
 fs_permissions = [
   { access = "read-write", path = "./test/invariant/.phase-reach-log.csv" },
+  { access = "read-write", path = "./script/demo/.demo-state.json" },
 ]
 
 [fuzz]
