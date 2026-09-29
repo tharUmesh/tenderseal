@@ -1,5 +1,6 @@
-import { encodeAbiParameters, keccak256, type Address, type PublicClient } from "viem";
+import { decodeFunctionData, encodeAbiParameters, keccak256, type Address, type PublicClient } from "viem";
 import { tenderAbi, vendorRegistryAbi } from "../abi.js";
+import { computeCommitment } from "../crypto/commitment.js";
 import type { BidModel, CheckResult, ReconstructedTender } from "./model.js";
 
 /** `keccak256(abi.encode(tender, vendorId))` (SPEC §5 tie rank), byte-for-byte. */
@@ -116,42 +117,104 @@ function classifyExpectedSettlement(
 }
 
 // ---------------------------------------------------------------------
-// V1: PriceRevealed structural integrity
+// V1: every PriceRevealed matches its commitment
 // ---------------------------------------------------------------------
-// The verifier has no access to bidders' private salts, so it cannot re-derive
-// priceCommitment from scratch (nor does it need to: the contract already rejects any
-// revealPrice call whose (price, salt) doesn't hash to the recorded priceCommitment
-// before PriceRevealed is ever emitted). What IS independently checkable from public
-// data: every reveal belongs to a bid that had committed, was Eligible at the time, and
-// reveals at most once.
-function checkV1_PriceRevealIntegrity(model: ReconstructedTender): CheckResult {
+// The salt is never emitted in any event -- but it IS a public function argument to
+// revealPrice(address,uint256,bytes32), so it sits in that transaction's own calldata
+// forever, for anyone to read back. This decodes it directly from calldata and
+// recomputes the exact SPEC §5 commitment, then compares it against the bid's own
+// priceCommitment as recorded by BidCommitted/CommitmentReplaced (using the bid's
+// docHash as of submissionDeadline -- the model already reflects that, since no
+// replaceCommitment can occur after Open ends). A reveal relayed through another
+// contract (tx.to != tender) has calldata that isn't revealPrice(...)'s own, so it
+// cannot be decoded this way -- reported as NOT_VERIFIABLE, never silently as PASS.
+export async function checkV1_PriceRevealIntegrity(
+  model: ReconstructedTender,
+  client: PublicClient,
+): Promise<CheckResult> {
   const details: string[] = [];
+  const unverifiable: string[] = [];
   let pass = true;
   const revealCounts = new Map<Address, number>();
+  const chainId = BigInt(await client.getChainId());
+  let verifiedCount = 0;
 
   for (const ev of model.events) {
     if (ev.name !== "PriceRevealed") continue;
-    const bidder = ev.args.bidder as Address;
-    revealCounts.set(bidder, (revealCounts.get(bidder) ?? 0) + 1);
-    const bid = model.bids.get(bidder);
+    const eventBidder = ev.args.bidder as Address;
+    revealCounts.set(eventBidder, (revealCounts.get(eventBidder) ?? 0) + 1);
+
+    const bid = model.bids.get(eventBidder);
     if (!bid || bid.priceCommitment === "0x") {
       pass = false;
-      details.push(`${bidder}: PriceRevealed with no prior commitment on record`);
+      details.push(`${eventBidder}: PriceRevealed with no prior commitment on record`);
       continue;
     }
-    if (ev.timestamp < model.config.schedule.priceRevealStart || ev.timestamp >= model.config.schedule.priceRevealEnd) {
+    if (
+      ev.timestamp < model.config.schedule.priceRevealStart ||
+      ev.timestamp >= model.config.schedule.priceRevealEnd
+    ) {
       pass = false;
-      details.push(`${bidder}: PriceRevealed at ts=${ev.timestamp}, outside [priceRevealStart, priceRevealEnd)`);
+      details.push(`${eventBidder}: PriceRevealed at ts=${ev.timestamp}, outside [priceRevealStart, priceRevealEnd)`);
     }
+
+    if (!ev.txTo || ev.txTo.toLowerCase() !== model.address.toLowerCase()) {
+      unverifiable.push(
+        `${eventBidder}: revealed via a contract call (tx.to=${ev.txTo ?? "none"}, not the tender directly) -- calldata is not revealPrice(...)'s own, cannot decode`,
+      );
+      continue;
+    }
+
+    let decoded;
+    try {
+      decoded = decodeFunctionData({ abi: tenderAbi, data: ev.txInput });
+    } catch {
+      unverifiable.push(`${eventBidder}: tx.input could not be decoded against the Tender ABI`);
+      continue;
+    }
+    if (decoded.functionName !== "revealPrice") {
+      unverifiable.push(`${eventBidder}: direct tx call was ${decoded.functionName}(...), not revealPrice(...)`);
+      continue;
+    }
+
+    const [calldataBidder, calldataPrice, calldataSalt] = decoded.args as [Address, bigint, `0x${string}`];
+    if (calldataBidder.toLowerCase() !== eventBidder.toLowerCase() || calldataPrice !== (ev.args.price as bigint)) {
+      pass = false;
+      details.push(`${eventBidder}: calldata (bidder=${calldataBidder}, price=${calldataPrice}) != event`);
+      continue;
+    }
+
+    const recomputed = computeCommitment({
+      chainId,
+      tender: model.address,
+      bidder: calldataBidder,
+      price: calldataPrice,
+      docHash: bid.docHash,
+      salt: calldataSalt,
+    });
+    if (recomputed !== bid.priceCommitment) {
+      pass = false;
+      details.push(
+        `${eventBidder}: recomputed commitment ${recomputed} != recorded priceCommitment ${bid.priceCommitment}`,
+      );
+      continue;
+    }
+    verifiedCount++;
   }
+
   for (const [bidder, count] of revealCounts) {
     if (count > 1) {
       pass = false;
       details.push(`${bidder}: revealed ${count} times (expected at most once)`);
     }
   }
-  if (pass) details.push(`${revealCounts.size} reveal(s), each unique, each committed first, each within window`);
-  return { id: "V1", name: "PriceRevealed structural integrity", pass, details };
+  if (pass) {
+    details.push(
+      `${verifiedCount} reveal(s) cryptographically re-verified from calldata` +
+        (unverifiable.length > 0 ? `; ${unverifiable.length} not verifiable (see below)` : ""),
+    );
+  }
+  return { id: "V1", name: "PriceRevealed matches its commitment (from calldata)", pass, details, unverifiable };
 }
 
 // ---------------------------------------------------------------------
@@ -448,7 +511,7 @@ async function checkV8_AccountingBalance(model: ReconstructedTender, client: Pub
 
 export async function runAllChecks(model: ReconstructedTender, client: PublicClient): Promise<CheckResult[]> {
   return [
-    checkV1_PriceRevealIntegrity(model),
+    await checkV1_PriceRevealIntegrity(model, client),
     checkV2_VotesAndThreshold(model),
     checkV3_AppealsByOwnerOnly(model),
     checkV4_AuthorityActionsScoped(model),

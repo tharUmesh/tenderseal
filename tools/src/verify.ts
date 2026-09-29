@@ -51,23 +51,35 @@ async function main(): Promise<void> {
 }
 
 function printTable(results: CheckResult[]): void {
+  const resultLabel = (r: CheckResult) => {
+    const base = r.pass ? "PASS" : "FAIL";
+    const n = r.unverifiable?.length ?? 0;
+    return n > 0 ? `${base} (${n} unverifiable)` : base;
+  };
+
   const idWidth = Math.max(...results.map((r) => r.id.length), 2);
   const nameWidth = Math.max(...results.map((r) => r.name.length), 4);
+  const resultWidth = Math.max(...results.map((r) => resultLabel(r).length), 6);
 
   const line = (a: string, b: string, c: string) =>
-    `| ${a.padEnd(idWidth)} | ${b.padEnd(nameWidth)} | ${c} |`;
+    `| ${a.padEnd(idWidth)} | ${b.padEnd(nameWidth)} | ${c.padEnd(resultWidth)} |`;
 
   console.log(line("ID", "Check", "Result"));
-  console.log(`|${"-".repeat(idWidth + 2)}|${"-".repeat(nameWidth + 2)}|--------|`);
+  console.log(`|${"-".repeat(idWidth + 2)}|${"-".repeat(nameWidth + 2)}|${"-".repeat(resultWidth + 2)}|`);
   for (const r of results) {
-    console.log(line(r.id, r.name, r.pass ? "PASS" : "FAIL"));
+    console.log(line(r.id, r.name, resultLabel(r)));
   }
   console.log("");
 
   for (const r of results) {
-    if (r.pass) continue;
-    console.log(`${r.id} FAIL details:`);
-    for (const d of r.details) console.log(`  - ${d}`);
+    if (!r.pass) {
+      console.log(`${r.id} FAIL details:`);
+      for (const d of r.details) console.log(`  - ${d}`);
+    }
+    if (r.unverifiable && r.unverifiable.length > 0) {
+      console.log(`${r.id} NOT VERIFIABLE (not counted as pass or fail):`);
+      for (const d of r.unverifiable) console.log(`  - ${d}`);
+    }
   }
 
   const passCount = results.filter((r) => r.pass).length;

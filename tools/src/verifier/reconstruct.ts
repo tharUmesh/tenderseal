@@ -27,7 +27,7 @@ export async function reconstructTender(
   });
 
   const blockTimestampCache = new Map<bigint, bigint>();
-  const txFromCache = new Map<string, Address>();
+  const txCache = new Map<string, { from: Address; to: Address | undefined; input: `0x${string}` }>();
   const events: EnrichedEvent[] = [];
 
   for (const log of logs) {
@@ -40,11 +40,11 @@ export async function reconstructTender(
     }
 
     const txHash = log.transactionHash!;
-    let txFrom = txFromCache.get(txHash);
-    if (txFrom === undefined) {
-      const tx = await client.getTransaction({ hash: txHash });
-      txFrom = tx.from;
-      txFromCache.set(txHash, txFrom);
+    let tx = txCache.get(txHash);
+    if (tx === undefined) {
+      const fetched = await client.getTransaction({ hash: txHash });
+      tx = { from: fetched.from, to: fetched.to ?? undefined, input: fetched.input };
+      txCache.set(txHash, tx);
     }
 
     events.push({
@@ -53,7 +53,9 @@ export async function reconstructTender(
       args: log.args as any,
       blockNumber,
       timestamp,
-      txFrom,
+      txFrom: tx.from,
+      txTo: tx.to,
+      txInput: tx.input,
       logIndex: log.logIndex!,
     });
   }

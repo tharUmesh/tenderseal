@@ -315,7 +315,11 @@ contract Tender is ReentrancyGuard {
 
     /// @notice Commit a salted price commitment and technical documents, locking a deposit.
     /// @param priceCommitment keccak256(abi.encode(chainid, this, bidder, price, docHash, salt)).
-    /// @param docHash Hash of the (encrypted) technical documents.
+    /// @param docHash Hash of the plaintext technical documents (SPEC §4): checked by
+    ///        evaluators after fetching and decrypting via `docCipherRef` (SPEC §8). Not a
+    ///        hash of the ciphertext -- AES-GCM is not key-committing, and the same
+    ///        symmetric key is wrapped separately per evaluator, so only a plaintext hash
+    ///        binds every evaluator's independently-decrypted output to one value.
     /// @param docCipherRef Reference to where the encrypted documents can be fetched.
     function commit(bytes32 priceCommitment, bytes32 docHash, bytes32 docCipherRef)
         external

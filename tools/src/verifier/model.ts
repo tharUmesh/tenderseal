@@ -63,13 +63,17 @@ export interface BidModel {
   settledAt?: bigint;
 }
 
-/** One decoded event, enriched with its block timestamp and the originating tx sender. */
+/** One decoded event, enriched with its block timestamp and originating transaction. */
 export interface EnrichedEvent {
   name: string;
   args: Record<string, unknown>;
   blockNumber: bigint;
   timestamp: bigint;
   txFrom: Address;
+  /** The transaction's direct call target -- `undefined` for a contract-creation tx. */
+  txTo: Address | undefined;
+  /** Raw calldata of the transaction that emitted this event. */
+  txInput: Hex;
   logIndex: number;
 }
 
@@ -90,4 +94,10 @@ export interface CheckResult {
   name: string;
   pass: boolean;
   details: string[];
+  /**
+   * Items this check could not evaluate at all (e.g. a reveal relayed through a
+   * contract, whose calldata isn't `revealPrice(...)`) -- reported distinctly, never
+   * folded into `pass` as if they were confirmed PASSes.
+   */
+  unverifiable?: string[];
 }

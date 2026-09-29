@@ -114,11 +114,14 @@ cd ..; forge test --match-contract CommitmentVectorTest -vv      # re-derives it
 ```
 
 **Brute-force demo** (SPEC claim 1's caveat: no salt hides nothing) — searches LKR
-1,000,000-25,000,000 for a zero-salt commitment, then estimates the same search with a
-real 256-bit salt:
+1,000,000-25,000,000 for a zero-salt commitment (every whole rupee, or pass `--step` to
+try only prices rounded to that many rupees — much faster, since it shrinks the search
+space), then estimates the same search with a real 256-bit salt, both at this run's own
+measured throughput and at an assumed GPU-class 1e9 hashes/sec:
 
 ```powershell
-npm run bruteforce
+npm run bruteforce                # every whole rupee
+npm run bruteforce -- --step 1000 # + a second pass: prices rounded to the nearest 1,000
 ```
 
 **Document encryption** (SPEC §6.4, §8) — encrypts a document for a committee of
@@ -133,7 +136,15 @@ npm run docs:decrypt -- --summary out\docs\summary.json --envelopes out\docs\key
 
 **Public verifier** — fetches every event a tender ever emitted and independently
 re-derives §4-§9 from them (never trusting the contract's own derived views for the
-state being checked), printing a PASS/FAIL table:
+state being checked), printing a PASS/FAIL table. V1 decodes each `revealPrice`
+transaction's own calldata (the salt is never emitted, but it IS a public function
+argument, so it's permanently visible there) and recomputes the exact SPEC §5
+commitment; a reveal relayed through another contract (not called on the tender
+directly) is reported as "not verifiable from calldata", never silently counted as a
+pass. `tools/test/verify.test.ts` demonstrates V1 catching a crafted mismatch (the real
+contract itself can never produce one -- it rejects any reveal that doesn't satisfy the
+commitment before the event is even emitted, so this is necessarily a unit test, not a
+live one):
 
 ```powershell
 npm run verify -- --rpc-url http://127.0.0.1:8545 --tender 0xTenderAddress

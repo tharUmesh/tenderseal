@@ -3,7 +3,7 @@ import { parseArgs } from "node:util";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { docCipherRefForPath, encryptDocument, type EvaluatorPublicKey } from "./docs.js";
+import { encryptDocument, type EvaluatorPublicKey } from "./docs.js";
 import { generateEvaluatorKeypair } from "./crypto/ecies.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -63,7 +63,6 @@ function main(): void {
 
   const cipherPath = join(outDir, "doc.enc");
   writeFileSync(cipherPath, bundle.paddedCiphertext);
-  const docCipherRef = docCipherRefForPath(cipherPath);
 
   const envelopesPath = join(outDir, "key-envelopes.json");
   writeFileSync(envelopesPath, bundle.keyEnvelopeBundleJson + "\n");
@@ -72,7 +71,7 @@ function main(): void {
     plaintextBytes: plaintext.length,
     paddedCiphertextBytes: bundle.paddedCiphertext.length,
     docHash: bundle.docHash,
-    docCipherRef,
+    docCipherRef: bundle.docCipherRef,
     docCipherPath: cipherPath,
     keyEnvelopeRef: bundle.keyEnvelopeRef,
     keyEnvelopesPath: envelopesPath,
@@ -90,8 +89,8 @@ function main(): void {
 
   console.log(`Encrypted ${values.in} (${plaintext.length} bytes plaintext)`);
   console.log(`  paddedCiphertext: ${cipherPath} (${bundle.paddedCiphertext.length} bytes, bucketed)`);
-  console.log(`  docHash:          ${bundle.docHash}`);
-  console.log(`  docCipherRef:     ${docCipherRef}`);
+  console.log(`  docHash:          ${bundle.docHash} (of the PLAINTEXT)`);
+  console.log(`  docCipherRef:     ${bundle.docCipherRef} (of the ciphertext; storage locator only)`);
   console.log(`  keyEnvelopeRef:   ${bundle.keyEnvelopeRef}`);
   console.log(`  keyEnvelopes:     ${envelopesPath}`);
   console.log(`  summary:          ${summaryPath}`);

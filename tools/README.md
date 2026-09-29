@@ -3,9 +3,12 @@
 Node + TypeScript + [viem](https://viem.sh) (SPEC §10 Step 9a). No cryptographic
 primitives are implemented here: salts and AES keys come from Node's built-in CSPRNG
 (`crypto.randomBytes`), hashing/ABI-encoding from `viem`, AES-256-GCM from Node's
-built-in (OpenSSL-backed) `crypto` module, and ECIES key-wrapping from
+built-in (OpenSSL-backed) `crypto` module, ECIES key-wrapping from
 [`eciesjs`](https://github.com/ecies/js) (secp256k1, matching SPEC §3's 33-byte
-compressed `evaluatorEncKeys`).
+compressed `evaluatorEncKeys`), and (in `bruteforce.ts` only, for throughput)
+[`@noble/hashes`](https://github.com/paulmillr/noble-hashes)'s `keccak_256` directly --
+the same primitive `viem`'s own `keccak256` uses internally, so the difference is
+avoiding per-candidate ABI-encoding overhead, not a different hash implementation.
 
 See the repo root [README.md](../README.md#off-chain-tools) for commands and the
 cross-language test vector. `src/` layout:
